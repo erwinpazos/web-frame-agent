@@ -176,10 +176,10 @@ async def websocket_extension_endpoint(websocket: WebSocket):
                         "url": cdp_bridge.active_tab_info.get("url"),
                     }))
                     continue
-                if data.get("type") == "iframe_navigated":
+                if data.get("type") in ("iframe_navigated", "target_navigated"):
                     new_url = data.get("url", "")
                     new_title = data.get("title", "")
-                    if new_url and new_url != cdp_bridge.active_tab_info.get("url"):
+                    if new_url and not new_url.startswith("about:") and new_url != cdp_bridge.active_tab_info.get("url"):
                         cdp_bridge.active_tab_info["url"] = new_url
                         if new_title:
                             cdp_bridge.active_tab_info["title"] = new_title
@@ -202,9 +202,13 @@ async def websocket_extension_endpoint(websocket: WebSocket):
                 if evt_method == "Page.frameNavigated":
                     frame = data.get("params", {}).get("frame", {})
                     f_url = frame.get("url", "")
-                    if f_url:
+                    parent_id = frame.get("parentId")
+                    # Only root frame of the target session updates active_tab_info URL; subframes (ads, tracking pixels, about:blank) are ignored
+                    if f_url and not parent_id and not f_url.startswith("about:"):
                         cdp_bridge.active_tab_info["url"] = f_url
-                        logger.info(f"[Iframe Navigation] Frame navigated to: {f_url}")
+                        logger.info(f"[Iframe Navigation] Root frame navigated to: {f_url}")
+                    elif f_url:
+                        logger.debug(f"[Iframe Navigation] Ignoring subframe navigation (parentId={parent_id}) to: {f_url}")
                 elif evt_method == "Page.loadEventFired":
                     logger.info(f"[Iframe Lifecycle] Page load event fired for current iframe")
                 elif evt_method == "Page.domContentEventFired":

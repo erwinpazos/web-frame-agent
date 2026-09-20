@@ -538,16 +538,29 @@ async function handleBackendMessage(message) {
         title: 'Workspace Target'
       }));
     }
-    // 2. If child session is attached, send Page.navigate scoped to the iframe session
+    // 2. If child session is attached, attempt navigation
     const targetSession = iframeSessionId || sessionId;
     if (targetSession) {
       chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId: targetSession }, 'Page.navigate', params, (result) => {
         const err = chrome.runtime.lastError;
-        sendResponse(msgId, sessionId, err, result || { frameId: 'iframe-main' });
+        if (err && err.message && err.message.includes("wasn't found")) {
+          // Chromium OOPIF subframe sessions do not support Page.navigate.
+          // Fall back to navigating via window.location.href in the child session.
+          console.log('[CDP Bridge] Page.navigate not supported on iframe target; falling back to window.location.href');
+          chrome.debugger.sendCommand(
+            { tabId: Number(hostTabId), sessionId: targetSession },
+            'Runtime.evaluate',
+            { expression: `window.location.href = ${JSON.stringify(navUrl)};`, userGesture: true },
+            () => {
+              sendResponse(msgId, sessionId, null, { frameId: 'iframe-main', loaderId: 'loader-1' });
+            }
+          );
+          return;
+        }
+        sendResponse(msgId, sessionId, err, result || { frameId: 'iframe-main', loaderId: 'loader-1' });
       });
       return;
     }
-
     sendResponse(msgId, sessionId, null, { frameId: 'iframe-main' });
     return;
   }
@@ -772,18 +785,31 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     const { sessionId, targetInfo } = params;
     console.log('[CDP Bridge Event] Target attached:', sessionId, targetInfo);
     const isHostTab = targetInfo && (targetInfo.targetId === String(hostTabId) || targetInfo.targetId === `tab-${hostTabId}` || isHostWorkspaceUrl(targetInfo.url));
+    // CRITICAL: Filter out ServiceWorkers, SharedWorkers and web workers so they NEVER hijack
+    // the target session. Workers do not have a DOM, which causes DOMSnapshot and DOM calls to fail.
+    const isWorker = targetInfo && (
+      targetInfo.type === 'service_worker' ||
+      targetInfo.type === 'shared_worker' ||
+      targetInfo.type === 'worker' ||
+      (targetInfo.url && (targetInfo.url.endsWith('.js') || targetInfo.url.includes('/sw.js') || targetInfo.url.includes('worker.js')))
+    );
+
     // When Chrome attaches the child iframe, accept the real sessionId directly!
-    // CRITICAL: Protect existing root workspace iframe session. Do NOT let nested sub-iframes
-    // (e.g. ogs.google.com, ad widgets) overwrite an already attached workspace target session.
-    const isCandidate = !isHostTab && (
+    // Protect existing root workspace iframe session. Do NOT let nested sub-iframes
+    // (e.g. ogs.google.com, ad widgets, about:blank trackers) overwrite an already attached workspace target session.
+    const isCandidate = !isHostTab && !isWorker && (
       targetInfo.type === 'iframe' ||
       targetInfo.type === 'other' ||
-      targetInfo.type === 'page' ||
-      (targetInfo.url && !isHostWorkspaceUrl(targetInfo.url))
-    );
+      targetInfo.type === 'page'
+    ) && (targetInfo.url ? !isHostWorkspaceUrl(targetInfo.url) : true);
+
     if (isCandidate) {
-      const isSubFrameOfExisting = iframeSessionId && targetInfo.type === 'iframe' && (
+      const isSubFrameOfExisting = iframeSessionId && (
+        targetInfo.type === 'iframe' || targetInfo.type === 'other'
+      ) && (
         !targetInfo.url ||
+        targetInfo.url === 'about:blank' ||
+        targetInfo.url.startsWith('about:') ||
         targetInfo.url.includes('ogs.google.com') ||
         targetInfo.url.includes('widget') ||
         targetInfo.url.startsWith('chrome-extension://')
@@ -987,6 +1013,10 @@ chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
   if (message.type === 'IFRAME_URL_CHANGED') {
     const liveUrl = message.url;
     const liveTitle = message.title || '';
+    if (!liveUrl || liveUrl.startsWith('about:')) {
+      console.log('[CDP Bridge] Ignoring blank/uninitialized iframe URL change:', liveUrl);
+      return;
+    }
     console.log('[CDP Bridge] Live iframe navigation detected:', liveUrl, liveTitle);
     if (iframeTargetInfo) {
       iframeTargetInfo.url = liveUrl;

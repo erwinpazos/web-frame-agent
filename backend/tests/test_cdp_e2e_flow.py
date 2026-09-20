@@ -145,5 +145,82 @@ class TestCDPBridgeE2E(unittest.IsolatedAsyncioTestCase):
             bu_task.cancel()
             await asyncio.gather(ext_task, bu_task, return_exceptions=True)
 
+    async def test_subframe_and_about_blank_navigation_filtered(self):
+        """Verifies that subframes (with parentId) and about:blank navigations never overwrite active_tab_info URL."""
+        ext_ws = MockWebSocket()
+        cdp_bridge.active_tab_info["url"] = "https://www.reddit.com/"
+
+        with patch("app.api.v1.endpoints.cdp_bridge.authenticate_websocket", return_value=True):
+            ext_task = asyncio.create_task(websocket_extension_endpoint(ext_ws))
+
+            # Handshake
+            await ext_ws.in_queue.put(json.dumps({
+                "type": "tab_info",
+                "tabId": 1234,
+                "url": "http://localhost:5173",
+                "title": "frontend",
+            }))
+            await ext_ws.in_queue.put(json.dumps({
+                "type": "iframe_info",
+                "targetId": "target-reddit-root",
+                "url": "https://www.reddit.com/",
+                "title": "Reddit",
+                "sessionId": "session-reddit-root",
+            }))
+            await asyncio.sleep(0.01)
+            self.assertEqual(cdp_bridge.active_tab_info["url"], "https://www.reddit.com/")
+
+            # 1. Subframe navigates to about:blank (e.g. ad or tracking frame with parentId)
+            await ext_ws.in_queue.put(json.dumps({
+                "method": "Page.frameNavigated",
+                "params": {
+                    "frame": {
+                        "id": "child-ad-frame",
+                        "parentId": "root-reddit-frame",
+                        "url": "about:blank",
+                    }
+                }
+            }))
+            await asyncio.sleep(0.01)
+            self.assertEqual(cdp_bridge.active_tab_info["url"], "https://www.reddit.com/", "Subframe about:blank must not overwrite root URL")
+
+            # 2. Subframe navigates to an external tracking URL with parentId
+            await ext_ws.in_queue.put(json.dumps({
+                "method": "Page.frameNavigated",
+                "params": {
+                    "frame": {
+                        "id": "child-ad-frame-2",
+                        "parentId": "root-reddit-frame",
+                        "url": "https://adservice.google.com/pixel",
+                    }
+                }
+            }))
+            await asyncio.sleep(0.01)
+            self.assertEqual(cdp_bridge.active_tab_info["url"], "https://www.reddit.com/", "Subframe navigation must not overwrite root URL")
+
+            # 3. iframe_navigated event with about:blank
+            await ext_ws.in_queue.put(json.dumps({
+                "type": "iframe_navigated",
+                "url": "about:blank",
+                "title": "",
+            }))
+            await asyncio.sleep(0.01)
+            self.assertEqual(cdp_bridge.active_tab_info["url"], "https://www.reddit.com/", "iframe_navigated with about:blank must be ignored")
+
+            # 4. Genuine root frame navigation (no parentId, valid URL)
+            await ext_ws.in_queue.put(json.dumps({
+                "method": "Page.frameNavigated",
+                "params": {
+                    "frame": {
+                        "id": "root-reddit-frame",
+                        "url": "https://www.reddit.com/submit",
+                    }
+                }
+            }))
+            await asyncio.sleep(0.01)
+            self.assertEqual(cdp_bridge.active_tab_info["url"], "https://www.reddit.com/submit", "Root frame navigation must update active_tab_info URL")
+
+            ext_task.cancel()
+            await asyncio.gather(ext_task, return_exceptions=True)
 if __name__ == "__main__":
     unittest.main()
