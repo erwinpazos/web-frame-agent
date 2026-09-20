@@ -469,6 +469,14 @@ async function handleBackendMessage(message) {
   if (method === 'Page.navigate') {
     const navUrl = params.url;
     console.log('[CDP Bridge] Navigating inside iframe to:', navUrl);
+
+    // CRITICAL RECURSION GUARD: Prohibit navigating workspace iframe to host application origin
+    if (isHostWorkspaceUrl(navUrl)) {
+      console.warn('[CDP Bridge] Navigation to host workspace URL blocked (recursion prevention):', navUrl);
+      sendResponse(msgId, sessionId, { message: 'Navigation to host workspace application URL is prohibited.' }, null);
+      return;
+    }
+
     // Run background pre-flight probe silently to synthesize DNR rules BEFORE first iframe render
     preflightProbeForUrl(navUrl).catch(() => {});
     // 1. Notify frontend to update address bar & iframe src
@@ -714,6 +722,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     console.log('[CDP Bridge Event] Target attached:', sessionId, targetInfo);
     const isHostTab = targetInfo && (targetInfo.targetId === String(hostTabId) || targetInfo.targetId === `tab-${hostTabId}` || isHostWorkspaceUrl(targetInfo.url));
     // When Chrome attaches the child iframe, accept the real sessionId directly!
+    // CRITICAL: Protect existing root workspace iframe session. Do NOT let nested sub-iframes
+    // (e.g. ogs.google.com, ad widgets) overwrite an already attached workspace target session.
     const isCandidate = !isHostTab && (
       targetInfo.type === 'iframe' ||
       targetInfo.type === 'other' ||
@@ -721,16 +731,26 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       (targetInfo.url && !isHostWorkspaceUrl(targetInfo.url))
     );
     if (isCandidate) {
-      iframeSessionId = sessionId;
-      iframeTargetInfo = targetInfo;
-      console.log('[CDP Bridge] Successfully bound to workspace iframe session:', iframeSessionId, iframeTargetInfo);
-      notifyBackendIframeInfo();
+      const isSubFrameOfExisting = iframeSessionId && targetInfo.type === 'iframe' && (
+        !targetInfo.url ||
+        targetInfo.url.includes('ogs.google.com') ||
+        targetInfo.url.includes('widget') ||
+        targetInfo.url.startsWith('chrome-extension://')
+      );
+      if (isSubFrameOfExisting) {
+        console.log('[CDP Bridge] Ignoring child sub-iframe attachment to keep root target session:', targetInfo);
+      } else {
+        iframeSessionId = sessionId;
+        iframeTargetInfo = targetInfo;
+        console.log('[CDP Bridge] Successfully bound to workspace iframe session:', iframeSessionId, iframeTargetInfo);
+        notifyBackendIframeInfo();
 
-      // Enable Network and Page on the child iframe session to ensure cookies and security policies are active
-      try {
-        chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId: iframeSessionId }, 'Network.enable', {}, () => {});
-        chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId: iframeSessionId }, 'Page.enable', {}, () => {});
-      } catch (e) {}
+        // Enable Network and Page on the child iframe session to ensure cookies and security policies are active
+        try {
+          chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId: iframeSessionId }, 'Network.enable', {}, () => {});
+          chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId: iframeSessionId }, 'Page.enable', {}, () => {});
+        } catch (e) {}
+      }
     }
   }
   if (method === 'Target.detachedFromTarget') {

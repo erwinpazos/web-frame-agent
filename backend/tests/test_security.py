@@ -492,6 +492,20 @@ class TestSecurity(unittest.TestCase):
             self.assertEqual(err_data["error"]["message"], "extension_disconnected")
 
         asyncio.run(scenario())
+    def test_recursive_navigation_to_host_url_is_blocked(self):
+        """Verify that Page.navigate to host workspace URL is strictly blocked to prevent inception."""
+        import json
+        with self.client.websocket_connect(f"/api/v1/cdp/devtools/browser?token={self.token}") as bu_ws:
+            bu_ws.send_text(json.dumps({
+                "id": 888,
+                "method": "Page.navigate",
+                "params": {"url": "http://localhost:5173/"}
+            }))
+            resp = json.loads(bu_ws.receive_text())
+            self.assertEqual(resp["id"], 888)
+            self.assertIn("error", resp)
+            self.assertEqual(resp["error"]["code"], -32000)
+            self.assertIn("prohibited", resp["error"]["message"].lower())
 
 if __name__ == "__main__":
     unittest.main()

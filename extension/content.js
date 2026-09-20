@@ -108,10 +108,14 @@ document.addEventListener('submit', (event) => {
   } catch (e) {}
 }, true);
 
-// 4. Notify parent window and background service worker of genuine navigation events
+// 4. Notify parent window and background service worker of genuine navigation events.
+// CRITICAL: Only the DIRECT child iframe of the workspace tab (window.parent === window.top)
+// represents the workspace target. Nested sub-frames (e.g. Google widgets, ads, analytics)
+// MUST NOT emit top-level navigation updates to avoid overriding the user's active target.
 function notifyParentOfNavigation() {
   try {
-    if (window !== window.top && window.location && window.location.href) {
+    const isDirectChild = window !== window.top && window.parent === window.top;
+    if (isDirectChild && window.location && window.location.href) {
       const liveUrl = window.location.href;
       const liveTitle = document.title || '';
 
@@ -131,7 +135,6 @@ function notifyParentOfNavigation() {
     }
   } catch (e) {}
 }
-
 window.addEventListener('DOMContentLoaded', notifyParentOfNavigation);
 window.addEventListener('load', notifyParentOfNavigation);
 window.addEventListener('popstate', notifyParentOfNavigation);

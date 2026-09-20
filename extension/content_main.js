@@ -163,7 +163,8 @@
   try {
     const notifyParentOfNavigation = () => {
       try {
-        if (window !== window.top && window.location && window.location.href) {
+        const isDirectChild = window !== window.top && window.parent === window.top;
+        if (isDirectChild && window.location && window.location.href) {
           const liveUrl = window.location.href;
           const liveTitle = document.title || '';
           window.parent.postMessage({
