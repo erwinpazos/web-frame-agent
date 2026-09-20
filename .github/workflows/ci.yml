@@ -1,0 +1,74 @@
+name: CI / CD Pipeline
+
+on:
+  push:
+    branches: [ main, feat/*, feature/* ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  frontend-check:
+    name: Frontend Lint & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile || bun install
+
+      - name: Run Linter (Oxlint)
+        run: bun run lint
+
+      - name: Build Frontend Application
+        env:
+          BACKEND_HOST: "127.0.0.1"
+          BACKEND_PORT: "8000"
+          FRONTEND_URL: "http://localhost:5173"
+        run: bun run build
+  backend-check:
+    name: Backend Test Suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv pip install -r requirements.txt --system
+      - name: Run Backend Security & E2E Tests
+        env:
+          GOOGLE_CLOUD_PROJECT: "test-gcp-project"
+          GOOGLE_CLOUD_LOCATION: "global"
+          GOOGLE_APPLICATION_CREDENTIALS: "/tmp/fake-key.json"
+          API_TOKEN: "test-ci-master-security-token-12345"
+          BACKEND_HOST: "127.0.0.1"
+          BACKEND_PORT: "8000"
+          FRONTEND_URL: "http://localhost:5173"
+          CORS_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
+          ALLOWED_HOSTS: "127.0.0.1,localhost,testserver"
+          ALLOWED_EXTENSION_ID: "ckfcbipidpedpdlijgmhmoapjlnfiaog"
+          LANGFUSE_HOST: ""
+        run: |
+          touch /tmp/fake-key.json
+          python -m unittest tests.test_llm_gateway tests.test_security tests.test_cdp_e2e_flow

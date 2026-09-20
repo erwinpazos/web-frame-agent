@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "Web-Frame Bridge - Browser Agent CDP & Iframe Unlocker",
+  "version": "1.3.0",
+  "description": "Unblocks iframes and establishes a direct Chrome DevTools Protocol (CDP) bridge for Browser-Use.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoBJGZnegFZy4GFSs2L+Uqf7tXT77PB/j8z4G+77YTd6D4SyyjAhYh5y7d7qocULtYKXzS/umJ7ZIKa/TTNLVzUyLHZexvsfNs7ANkvUPie3sig+Q+U0+vicHPDoL9NqVTwycW09+SasxGhm3ed+LPrkI3LGjydMzQuMUQe+yvb1cHRupmifD/EaB47UZkinB33Pk+4UGp52iU1bed2uhFdM1chCFMtl6K36wAnQLV74HSQRdKqz7cxZlQmLzPwgNnmO+J6+7/ce5kh8d46pVEEVItqS6Jtf6A2ClVeSKosTG1q4/RI1WdVQkhZvAaHBKE5YQgzj4NR+3qXX+PRLxpwIDAQAB",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Web-Frame Bridge"
+  },
+  "permissions": [
+    "debugger",
+    "tabs",
+    "activeTab",
+    "storage",
+    "contentSettings",
+    "privacy",
+    "cookies",
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "js": ["content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "js": ["content_main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
