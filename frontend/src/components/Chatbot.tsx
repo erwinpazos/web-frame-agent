@@ -11,15 +11,20 @@ import {
   RotateCcw,
   Activity,
   ArrowUpRight,
+  FileText,
+  X,
+  Eye,
+  Copy,
+  Check,
 } from 'lucide-react'
-import type { ChatMessage, AgentStep } from '../types/chat'
+import type { ChatMessage, AgentStep, ChatAttachment } from '../types/chat'
 
 interface ChatbotProps {
   messages: ChatMessage[]
   isBusy: boolean
   isReady?: boolean
   modelName?: string
-  onSendMessage: (prompt: string) => void
+  onSendMessage: (prompt: string, attachments?: ChatAttachment[]) => void
   onStopAgent: () => void
   onClearChat: () => void
 }
@@ -34,19 +39,99 @@ export function Chatbot({
   onClearChat,
 }: ChatbotProps) {
   const [inputText, setInputText] = useState('')
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([])
+  const [previewModal, setPreviewModal] = useState<ChatAttachment | null>(null)
+  const [copied, setCopied] = useState(false)
   const [expandedSteps, setExpandedSteps] = useState<Record<string, boolean>>({})
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isBusy])
+  }, [messages, isBusy, attachments])
+
+  // Auto-resize textarea
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`
+    }
+  }, [inputText])
+
+  // Handle ESC key for preview modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && previewModal) {
+        setPreviewModal(null)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [previewModal])
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const text = e.clipboardData.getData('text')
+    if (!text) return
+
+    // Convert large pastes (>= 300 chars or >= 5 lines) to attachment
+    const lines = text.split('\n')
+    if (text.length >= 300 || lines.length >= 5) {
+      e.preventDefault()
+
+      const sizeStr = text.length < 1024
+        ? `${text.length} B`
+        : `${(text.length / 1024).toFixed(1)} KB`
+
+      const firstLine = lines[0].trim().replace(/^[^a-zA-Z0-9#_.-]+/, '').slice(0, 30).trim()
+      const name = firstLine ? `Pasted: ${firstLine}...` : `Pasted Content ${attachments.length + 1}`
+
+      const newAttachment: ChatAttachment = {
+        id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name,
+        content: text,
+        lineCount: lines.length,
+        charCount: text.length,
+        size: sizeStr,
+      }
+
+      setAttachments((prev) => [...prev, newAttachment])
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter') {
+      if (e.shiftKey) {
+        // Shift+Enter -> newline
+        return
+      }
+      // Enter -> submit
+      e.preventDefault()
+      handleSubmit()
+    }
+  }
+
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id))
+  }
+
+  const handleCopyAttachment = (content: string) => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault()
-    if (!inputText.trim() || isBusy || !isReady) return
-    onSendMessage(inputText)
+    const trimmed = inputText.trim()
+    if ((!trimmed && attachments.length === 0) || isBusy || !isReady) return
+    onSendMessage(trimmed, attachments.length > 0 ? attachments : undefined)
     setInputText('')
+    setAttachments([])
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+    }
   }
 
   const toggleStepExpansion = (stepKey: string) => {
@@ -110,7 +195,33 @@ export function Chatbot({
                     <span className="text-[10px] font-mono text-cyan-400 uppercase tracking-wider">PROMPT</span>
                     <span className="text-[10px] font-mono text-[#8892b0]">{msg.timestamp}</span>
                   </div>
-                  <p className="text-slate-200 font-mono text-[12px]">{msg.text}</p>
+                  {msg.text && (
+                    <p className="text-slate-200 font-mono text-[12px] whitespace-pre-wrap break-words">{msg.text}</p>
+                  )}
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="mt-2 pt-2 border-t border-[#1e2230] flex flex-wrap gap-2">
+                      {msg.attachments.map((att) => (
+                        <button
+                          key={att.id}
+                          type="button"
+                          onClick={() => setPreviewModal(att)}
+                          className="flex items-center gap-2 px-2.5 py-1.5 bg-[#090a0f] hover:bg-[#10121a] border border-[#2d3345] hover:border-cyan-400/50 text-left transition cursor-pointer"
+                          title="Click to view attachment"
+                        >
+                          <FileText className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                          <div className="flex flex-col min-w-0">
+                            <span className="text-[11px] font-mono text-slate-200 truncate max-w-[200px]">
+                              {att.name}
+                            </span>
+                            <span className="text-[9px] font-mono text-[#8892b0]">
+                              {att.lineCount} lines · {att.size}
+                            </span>
+                          </div>
+                          <Eye className="w-3 h-3 text-[#8892b0] hover:text-cyan-400 ml-1 shrink-0" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="w-5 h-5 border border-[#2d3345] bg-[#141722] flex items-center justify-center shrink-0 text-[#8892b0] text-[10px] mt-0.5">
                   <User className="w-3 h-3" />
@@ -256,24 +367,59 @@ export function Chatbot({
       </div>
 
       {/* Chat Input Bar */}
-      <form onSubmit={handleSubmit} className="p-3 border-t border-[#1e2230] bg-[#10121a] shrink-0">
-        <div className="relative flex items-center">
-          <input
-            type="text"
+      <form onSubmit={handleSubmit} className="border-t border-[#1e2230] bg-[#10121a] shrink-0">
+        {/* Attached Snippets Preview */}
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 p-2.5 bg-[#0d0f17] border-b border-[#1e2230]">
+            {attachments.map((att) => (
+              <div
+                key={att.id}
+                className="flex items-center gap-2 px-2.5 py-1.5 bg-[#141722] border border-cyan-500/40 text-xs font-mono text-slate-200"
+              >
+                <FileText className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <button
+                  type="button"
+                  onClick={() => setPreviewModal(att)}
+                  className="cursor-pointer hover:underline text-[11px] truncate max-w-[180px] text-left"
+                  title="Click to preview"
+                >
+                  {att.name}
+                </button>
+                <span className="text-[10px] text-[#8892b0] shrink-0">({att.lineCount}L, {att.size})</span>
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(att.id)}
+                  className="text-[#8892b0] hover:text-rose-400 transition ml-0.5 p-0.5 cursor-pointer"
+                  title="Remove attachment"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="relative flex items-end p-2.5">
+          <textarea
+            ref={textareaRef}
+            rows={1}
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
             disabled={isBusy || !isReady}
             placeholder={
               !isReady
                 ? "ATTACH_WAIT: Target view synchronizing..."
                 : isBusy
                 ? "AGENT_BUSY: Reasoning & navigating DOM..."
-                : "Type instruction or query for the agent..."
+                : "Type instruction... (Shift+Enter for newline)"
             }
-            className="w-full bg-[#090a0f] border border-[#1e2230] focus:border-cyan-400 text-xs font-mono text-slate-200 pl-3.5 pr-20 py-2.5 outline-none transition disabled:opacity-50"
+            className="w-full bg-[#090a0f] border border-[#1e2230] focus:border-cyan-400 text-xs font-mono text-slate-200 pl-3.5 pr-20 py-2.5 outline-none resize-none overflow-y-auto max-h-40 transition disabled:opacity-50"
+            style={{ minHeight: '40px' }}
           />
 
-          <div className="absolute right-1.5 flex items-center gap-1">
+          <div className="absolute right-4 bottom-4 flex items-center gap-1">
             {isBusy ? (
               <button
                 type="button"
@@ -286,9 +432,9 @@ export function Chatbot({
             ) : (
               <button
                 type="submit"
-                disabled={!inputText.trim() || !isReady}
+                disabled={(!inputText.trim() && attachments.length === 0) || !isReady}
                 className="p-1.5 text-cyan-400 hover:text-white hover:bg-slate-800 border border-transparent hover:border-[#1e2230] transition disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
-                title="Send command"
+                title="Send command (Enter)"
               >
                 <Send className="w-3.5 h-3.5" />
               </button>
@@ -296,6 +442,67 @@ export function Chatbot({
           </div>
         </div>
       </form>
+
+      {/* Attachment View Modal */}
+      {previewModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150"
+          onClick={() => setPreviewModal(null)}
+        >
+          <div
+            className="bg-[#10121a] border border-[#2d3345] w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="px-4 py-3 border-b border-[#1e2230] flex items-center justify-between bg-[#141722]">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-4 h-4 text-cyan-400 shrink-0" />
+                <span className="font-mono text-xs font-semibold text-slate-200 truncate">
+                  {previewModal.name}
+                </span>
+                <span className="text-[10px] font-mono text-[#8892b0] shrink-0">
+                  ({previewModal.lineCount} lines, {previewModal.charCount} characters, {previewModal.size})
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleCopyAttachment(previewModal.content)}
+                  className="flex items-center gap-1 px-2 py-1 bg-[#090a0f] hover:bg-[#1e2230] text-[11px] font-mono text-slate-300 border border-[#2d3345] transition cursor-pointer"
+                  title="Copy content"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="w-3 h-3 text-emerald-400" />
+                      <span className="text-emerald-400">COPIED</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3 h-3 text-[#8892b0]" />
+                      <span>COPY</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewModal(null)}
+                  className="p-1 text-[#8892b0] hover:text-white transition cursor-pointer"
+                  title="Close (Esc)"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-4 overflow-auto flex-1 bg-[#090a0f]">
+              <pre className="text-xs font-mono text-slate-300 whitespace-pre-wrap break-all select-text leading-relaxed">
+                {previewModal.content}
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

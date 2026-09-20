@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { ChatMessage, AgentStep, WebSocketStatus } from '../types/chat'
+import type { ChatMessage, AgentStep, WebSocketStatus, ChatAttachment } from '../types/chat'
 
 interface UseAgentChatProps {
   onUrlChanged?: (newUrl: string) => void
@@ -208,8 +208,10 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
     }
   }, [authToken])
 
-  const sendMessage = useCallback((prompt: string, targetUrl: string) => {
-    if (!prompt.trim()) return
+  const sendMessage = useCallback((prompt: string, targetUrl: string, attachments?: ChatAttachment[]) => {
+    const trimmedPrompt = prompt.trim()
+    const hasAttachments = Boolean(attachments && attachments.length > 0)
+    if (!trimmedPrompt && !hasAttachments) return
 
     const userMsgId = 'user-' + Date.now()
     const agentMsgId = 'agent-' + (Date.now() + 1)
@@ -223,7 +225,8 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
     const userMsg: ChatMessage = {
       id: userMsgId,
       sender: 'user',
-      text: prompt.trim(),
+      text: trimmedPrompt || (hasAttachments ? '(Attached content)' : ''),
+      attachments: hasAttachments ? attachments : undefined,
       timestamp: timeStr,
     }
 
@@ -239,11 +242,20 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
     setMessages((prev) => [...prev, userMsg, agentPlaceholderMsg])
     setIsBusy(true)
 
+    // Build the payload for the agent including any attached content
+    let fullTask = trimmedPrompt
+    if (hasAttachments && attachments) {
+      const formatted = attachments.map((att) =>
+        `\n\n--- [ATTACHMENT: ${att.name} (${att.lineCount} lines, ${att.size})] ---\n${att.content}\n--- [END ATTACHMENT] ---`
+      ).join('')
+      fullTask = fullTask ? `${fullTask}${formatted}` : formatted.trim()
+    }
+
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           type: 'start_task',
-          task: prompt.trim(),
+          task: fullTask,
           url: targetUrl,
           session_id: sessionIdRef.current,
           max_steps: 15,
