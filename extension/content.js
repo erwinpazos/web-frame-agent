@@ -157,8 +157,8 @@ function notifyParentOfNavigation() {
     const isDirectChild = window !== window.top && window.parent === window.top;
     if (isDirectChild && window.location && window.location.href) {
       const liveUrl = window.location.href;
+      if (!liveUrl || liveUrl.startsWith('about:')) return;
       const liveTitle = document.title || '';
-
       // Post message to parent frontend window
       window.parent.postMessage({
         type: 'COBROWSE_IFRAME_NAVIGATED',

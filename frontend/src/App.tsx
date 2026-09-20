@@ -56,7 +56,14 @@ export function App() {
   }
 
   const handleAgentUrlChanged = (newUrl: string) => {
-    if (newUrl && newUrl !== currentUrlRef.current && !isHostWorkspaceDestination(newUrl)) {
+    if (
+      newUrl &&
+      newUrl !== currentUrlRef.current &&
+      !newUrl.startsWith('about:') &&
+      !newUrl.startsWith('javascript:') &&
+      !newUrl.startsWith('data:') &&
+      !isHostWorkspaceDestination(newUrl)
+    ) {
       currentUrlRef.current = newUrl
       setCurrentUrl(newUrl)
       setInputUrl(newUrl)
