@@ -390,6 +390,7 @@ export function App() {
               defaultValue={DEFAULT_URL}
               src={DEFAULT_URL}
               title="Workspace Target View"
+              allow="storage-access; camera; microphone; clipboard-write; clipboard-read; payment; geolocation"
               className="w-full h-full border-none bg-white"
               style={{
                 willChange: 'transform',

@@ -79,16 +79,56 @@ try {
 } catch (e) {
   // Ignore if window is frozen
 }
+// Unlock unpartitioned cookies for cross-origin workspace iframe via W3C Storage Access API
+async function requestIframeStorageAccess() {
+  try {
+    if (document.requestStorageAccess) {
+      const hasAccess = document.hasStorageAccess ? await document.hasStorageAccess() : false;
+      if (!hasAccess) {
+        await document.requestStorageAccess();
+        console.log('[CDP Bridge] Storage access granted for embedded frame:', window.location.hostname);
+      }
+    }
+  } catch (e) {}
+}
+
+document.addEventListener('click', requestIframeStorageAccess, { capture: true, passive: true });
+document.addEventListener('pointerdown', requestIframeStorageAccess, { capture: true, passive: true });
+document.addEventListener('keydown', requestIframeStorageAccess, { capture: true, passive: true });
+if (document.hasStorageAccess) {
+  document.hasStorageAccess().then((has) => {
+    if (!has && document.requestStorageAccess) {
+      document.requestStorageAccess().catch(() => {});
+    }
+  }).catch(() => {});
+}
 
 // 2. Intercept link clicks with target="_blank" or external windows and force in-frame navigation
+// EXCEPT for OAuth authentication portals (Google, Apple, Microsoft, GitHub) which forbid iframes.
+function isAuthPortalUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const lower = url.toLowerCase();
+  return (
+    lower.includes('accounts.google.com') ||
+    lower.includes('appleid.apple.com') ||
+    lower.includes('login.microsoftonline.com') ||
+    lower.includes('github.com/login/oauth') ||
+    (lower.includes('facebook.com/v') && lower.includes('/dialog/oauth'))
+  );
+}
+
 function forceSameFrameNavigation(event) {
   try {
     const anchor = event.target && event.target.closest ? event.target.closest('a') : null;
     if (anchor) {
+      const href = anchor.href || anchor.getAttribute('href') || '';
+      if (isAuthPortalUrl(href)) {
+        // Allow OAuth login portals to open in native popup/tab
+        return;
+      }
       if (anchor.target && anchor.target.toLowerCase() !== '_self') {
         anchor.target = '_self';
       }
-      const href = anchor.href || anchor.getAttribute('href');
       // Only intervene if anchor has target="_blank" and a real external URL
       if (href && anchor.target === '_self' && !href.startsWith('javascript:') && !href.startsWith('#')) {
         // Let standard browser click proceed naturally inside _self

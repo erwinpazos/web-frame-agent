@@ -71,10 +71,34 @@ async function fetchUnlockRules() {
   }
 }
 
+// Universal apex domain extractor for multi-subdomain API coverage (e.g. www.reddit.com -> reddit.com covering gql.reddit.com)
+const KNOWN_PUBLIC_SUFFIXES = ['herokuapp.com', 'github.io', 'pages.dev', 'vercel.app', 'web.app', 'firebaseapp.com'];
+function getApexDomain(domain) {
+  if (!domain || typeof domain !== 'string') return '';
+  const clean = domain.toLowerCase().trim().replace(/^\./, '');
+  for (const suffix of KNOWN_PUBLIC_SUFFIXES) {
+    if (clean.endsWith('.' + suffix)) {
+      const prefix = clean.slice(0, clean.length - suffix.length - 1);
+      const subParts = prefix.split('.');
+      return subParts[subParts.length - 1] + '.' + suffix;
+    }
+  }
+  const parts = clean.split('.');
+  if (parts.length <= 2) return clean;
+  const twoPartTLDs = new Set(['co.uk', 'com.au', 'co.nz', 'co.jp', 'com.br', 'co.in', 'gouv.fr', 'org.uk']);
+  const lastTwo = parts.slice(-2).join('.');
+  if (twoPartTLDs.has(lastTwo)) {
+    return parts.slice(-3).join('.');
+  }
+  return parts.slice(-2).join('.');
+}
+
 async function applyDnrRuleForDomain(domain, headersToStrip) {
   if (!chrome.declarativeNetRequest || !headersToStrip || headersToStrip.length === 0) return;
   try {
     const domainClean = domain.toLowerCase().trim();
+    const apexDomain = getApexDomain(domainClean) || domainClean;
+
     let ruleId = domainToRuleId.get(domainClean);
     if (!ruleId) {
       ruleId = nextDnrRuleId++;
@@ -86,26 +110,53 @@ async function applyDnrRuleForDomain(domain, headersToStrip) {
       operation: 'remove',
     }));
 
-    const condition = {
-      urlFilter: `||${domainClean}`,
-      resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'other'],
-    };
+    // Universal Origin & Referer spoofing: rewrite subresource requests (XHR, fetch, sub_frame)
+    // using the apex root domain so that all cross-subdomain APIs (e.g. gql.reddit.com, oauth.reddit.com)
+    // accept in-iframe requests without CORS or 403 rejections.
+    const targetOrigin = `https://${domainClean}`;
+    const targetReferer = `https://${domainClean}/`;
+    const requestHeaders = [
+      { header: 'Origin', operation: 'set', value: targetOrigin },
+      { header: 'Referer', operation: 'set', value: targetReferer },
+    ];
+    // Filter applies to both the specific sub-domain AND the root apex domain (||apexDomain matches all subdomains)
+    const filterDomain = apexDomain || domainClean;
+    const requestRuleId = ruleId + 10000;
 
-    const dynamicRule = {
+    // Rule 1: Strip blocking response headers on ALL resource types (including main_frame)
+    const responseRule = {
       id: ruleId,
       priority: 1,
       action: {
         type: 'modifyHeaders',
         responseHeaders,
       },
-      condition,
+      condition: {
+        urlFilter: `||${filterDomain}`,
+        resourceTypes: ['main_frame', 'sub_frame', 'xmlhttprequest', 'other'],
+      },
     };
+
+    // Rule 2: Spoof Origin & Referer ONLY on sub-requests (XHR, fetch, sub_frame), NEVER on top-level main_frame GET navigations
+    const requestRule = {
+      id: requestRuleId,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders,
+      },
+      condition: {
+        urlFilter: `||${filterDomain}`,
+        resourceTypes: ['sub_frame', 'xmlhttprequest', 'other'],
+      },
+    };
+
     await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [ruleId],
-      addRules: [dynamicRule],
+      removeRuleIds: [ruleId, requestRuleId],
+      addRules: [responseRule, requestRule],
     });
 
-    console.log(`[CDP Bridge] Dynamic DNR rule ${ruleId} active for '${domainClean}': stripped headers:`, headersToStrip);
+    console.log(`[CDP Bridge] Dynamic DNR rules (${ruleId}, ${requestRuleId}) active for '${domainClean}' (Apex: '${filterDomain}'): stripped headers:`, headersToStrip, `spoofed Origin: '${targetOrigin}' on subrequests`);
   } catch (err) {
     console.warn(`[CDP Bridge] Error applying DNR rule for '${domain}':`, err);
   }
@@ -798,6 +849,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
               const targetUrl = `https://${cleanDomain}`;
               // For public suffixes like .herokuapp.com, specifying domain can cause Chrome to reject the cookie.
               // Omitting domain and supplying the full HTTPS url creates an exact host-only cookie that Chrome always accepts.
+              const isBarePublicSuffix = KNOWN_PUBLIC_SUFFIXES.some(s => cleanDomain === s || domain === s || domain === '.' + s);
               const setCookieParams = {
                 name: name,
                 value: value,
@@ -807,6 +859,11 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
                 sameSite: 'None',
                 httpOnly: httpOnly,
               };
+              // If the server explicitly set a domain and it's not a bare public suffix (e.g. .reddit.com),
+              // preserve the domain attribute with leading dot so all subdomains (www, gql, oauth) share the cookie!
+              if (domain && !isBarePublicSuffix) {
+                setCookieParams.domain = cleanDomain.startsWith('.') ? cleanDomain : '.' + cleanDomain;
+              }
               const currentTargetTab = hostTabId ? Number(hostTabId) : null;
               if (currentTargetTab) {
                 chrome.debugger.sendCommand(
