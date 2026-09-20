@@ -78,11 +78,47 @@
       } catch (e) {}
     },
 
-    // 4. Contain window.open to keep all popups, links, and external portals inside the iframe
+    // 4. Contain window.open to keep navigation inside the iframe, EXCEPT for OAuth authentication portals
+    // (Google, Apple, Microsoft, GitHub) which strictly forbid iframe embedding and must open as genuine popups.
     'contain-window-open': function() {
+      const isAuthUrl = function(url) {
+        if (!url || typeof url !== 'string') return false;
+        const lower = url.toLowerCase();
+        return (
+          lower.includes('accounts.google.com') ||
+          lower.includes('appleid.apple.com') ||
+          lower.includes('login.microsoftonline.com') ||
+          lower.includes('github.com/login/oauth') ||
+          lower.includes('facebook.com/v') && lower.includes('/dialog/oauth')
+        );
+      };
+
       try {
+        const originalWindowOpen = window.open;
         window.open = function(url, target, features) {
           if (url && typeof url === 'string') {
+            // OAuth providers fail with 403 or reject in-iframe rendering: delegate to native popup
+            if (isAuthUrl(url)) {
+              console.log('[CDP Bridge] OAuth portal detected, delegating to native popup:', url);
+              const popupWin = originalWindowOpen.call(window, url, target || '_blank', features || 'width=520,height=640,menubar=no,toolbar=no');
+              if (popupWin) {
+                // Monitor popup completion: when closed, ensure storage access without aborting in-flight login requests
+                const checkClosed = setInterval(() => {
+                  try {
+                    if (popupWin.closed) {
+                      clearInterval(checkClosed);
+                      console.log('[CDP Bridge] OAuth popup closed, ensuring storage access.');
+                      if (document.requestStorageAccess) {
+                        document.requestStorageAccess().catch(() => {});
+                      }
+                    }
+                  } catch (e) {
+                    clearInterval(checkClosed);
+                  }
+                }, 500);
+              }
+              return popupWin;
+            }
             try {
               window.location.assign(url);
             } catch (err) {
@@ -99,6 +135,10 @@
             let target = event.target;
             while (target && target.tagName !== 'A' && target.tagName !== 'AREA') {
               target = target.parentElement;
+            }
+            if (target && target.href && isAuthUrl(target.href)) {
+              // Allow OAuth authentication links to open in external popup/tab
+              return;
             }
             if (target && (target.target === '_blank' || target.target === '_top' || target.target === '_parent')) {
               target.target = '_self';
@@ -150,6 +190,32 @@
         window.addEventListener('DOMContentLoaded', removeBlockingMetas);
       } catch (e) {}
     },
+    // 6. Request W3C Storage Access API on user interactions (click, pointerdown, keydown)
+    'request-storage-access': function() {
+      try {
+        const unlockStorage = async function() {
+          try {
+            if (document.requestStorageAccess) {
+              const has = document.hasStorageAccess ? await document.hasStorageAccess() : false;
+              if (!has) {
+                await document.requestStorageAccess();
+                console.log('[CDP Bridge] Main-world storage access unlocked for:', window.location.hostname);
+              }
+            }
+          } catch (e) {}
+        };
+        document.addEventListener('click', unlockStorage, { capture: true, passive: true });
+        document.addEventListener('pointerdown', unlockStorage, { capture: true, passive: true });
+        document.addEventListener('keydown', unlockStorage, { capture: true, passive: true });
+        if (document.hasStorageAccess) {
+          document.hasStorageAccess().then((has) => {
+            if (!has && document.requestStorageAccess) {
+              document.requestStorageAccess().catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      } catch (e) {}
+    },
   };
 
   // Default baseline patches applied everywhere safely
@@ -158,6 +224,7 @@
   PATCHES['rewrite-cookies-chips']();
   PATCHES['contain-window-open']();
   PATCHES['strip-meta-csp']();
+  PATCHES['request-storage-access']();
 
   // Hook History API in MAIN world to capture SPA navigations (pushState / replaceState)
   try {
