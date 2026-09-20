@@ -377,6 +377,29 @@ export function App() {
 
           {/* Iframe Container */}
           <div className="flex-1 relative w-full h-full bg-[#090a0f]">
+            {/* Attachment Veil: shown until Chrome extension binds to target iframe OOPIF session */}
+            {!isIframeReady && (
+              <div className="absolute inset-0 bg-[#090a0f]/85 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center z-20 select-none">
+                <div className="max-w-md p-6 bg-[#10121a] border border-[#1e2230] flex flex-col items-center gap-3.5 shadow-2xl">
+                  <div className="relative flex items-center justify-center">
+                    <Radio className="w-8 h-8 text-amber-500 animate-pulse" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <h3 className="font-mono font-semibold text-xs tracking-wider text-slate-200 uppercase">
+                      ATTACH_WAIT: Target View Synchronizing
+                    </h3>
+                    <p className="text-[11px] font-mono text-[#8892b0] leading-relaxed">
+                      The Chrome extension is attaching to the target workspace iframe via CDP.
+                      Autonomous agent navigation will be enabled as soon as the session binds.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 px-2.5 py-1 bg-[#090a0f] border border-[#1e2230] text-[10px] font-mono text-[#8892b0]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
+                    <span>AWAITING EXTENSION OOPIF BINDING...</span>
+                  </div>
+                </div>
+              </div>
+            )}
             {isLoadingIframe && (
               <div className="absolute inset-0 bg-[#090a0f]/80 backdrop-blur-xs flex flex-col items-center justify-center gap-2.5 z-10 pointer-events-none">
                 <RefreshCw className="w-6 h-6 text-cyan-400 animate-spin" />

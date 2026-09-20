@@ -136,11 +136,11 @@ Open `http://localhost:5173` in the **same Chrome browser** where the extension 
 
 Web-Frame Agent natively supports multiple LLM backends via a unified decorator with Langfuse tracing and cost enforcement:
 
-- **Anthropic (`LLM_PROVIDER=anthropic`)** — Recommended for autonomous web navigation (`claude-3-5-sonnet-20241022`). Accurately tracks prompt caching reads (10% rate) and cache creation (125% rate) against the task cost kill-switch.
-- **OpenAI (`LLM_PROVIDER=openai`)** — Fast and capable with `gpt-4o` or `o3-mini`.
-- **Google Cloud Vertex AI (`LLM_PROVIDER=vertex`)** — Enterprise-grade Gemini models (`gemini-2.0-flash`, `gemini-1.5-pro`).
-- **Ollama (`LLM_PROVIDER=ollama`)** — 100% private and local inference (`qwen2.5:32b`, `llama3.3:70b`).
-  > **Note on Local Models**: Web automation agents require precise tool-calling and JSON structured output. Small local models (< 14B parameters) frequently fail to adhere to action schemas. For reliable autonomous navigation, use function-calling-optimized models with 32B+ parameters or a cloud provider.
+- **Anthropic (`LLM_PROVIDER=anthropic`)** — Recommended for autonomous web navigation (`claude-sonnet-5`). Accurately tracks prompt caching reads (10% rate) and cache creation (125% rate) against the task cost kill-switch.
+- **OpenAI (`LLM_PROVIDER=openai`)** — Fast and capable with `gpt-5`, `o3`, or `o3-mini`.
+- **Google Cloud Vertex AI (`LLM_PROVIDER=vertex`)** — Enterprise-grade Gemini models (`gemini-3.8-flash`, `gemini-3.7-flash`).
+- **Ollama (`LLM_PROVIDER=ollama`)** — 100% private and local inference (`qwen3.8:27b`, `qwen3.8:72b`).
+  > **Note on Local Models**: Web automation agents require precise tool-calling and JSON structured output. Small local models (< 14B parameters) frequently fail to adhere to action schemas. For reliable autonomous navigation, use function-calling-optimized models with 27B+ parameters (such as `qwen3.8:27b` or larger) or a cloud provider.
 
 ## Security & Threat Model
 
