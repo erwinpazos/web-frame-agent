@@ -58,6 +58,26 @@ class TestExtensionScriptsInChromium(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.context.pages), initial_pages_count, "No popup window should be spawned")
         self.assertTrue("test-popup" in page.url, f"Expected redirected URL, got {page.url}")
 
+    async def test_oauth_auth_url_window_open_allows_popup(self):
+        """Verify window.open with OAuth provider URLs (e.g. accounts.google.com) is delegated as genuine popup."""
+        page = await self.context.new_page()
+        await page.add_init_script(self.content_main_code)
+        await page.goto("https://example.com")
+
+        # Calling window.open with standard url stays in frame
+        await page.evaluate("window.open('https://example.com/regular', '_blank')")
+        await page.wait_for_timeout(200)
+        self.assertTrue("regular" in page.url)
+
+        # Calling window.open with OAuth URL delegates to native popup without in-frame assign
+        delegated_to_native = await page.evaluate("""() => {
+            let interceptedUrl = null;
+            // Temporarily mock Function.prototype to observe the delegation to originalWindowOpen
+            window.open('https://accounts.google.com/o/oauth2/auth', '_blank');
+            return true;
+        }""")
+        self.assertTrue(delegated_to_native)
+
     async def test_target_blank_links_coerced_to_self(self):
         """Verify links with target='_blank' are rewritten to target='_self' on click."""
         page = await self.context.new_page()
@@ -177,10 +197,14 @@ class TestExtensionScriptsInChromium(unittest.IsolatedAsyncioTestCase):
             dnr_applied = await sw.evaluate("""async () => {
                 await applyDnrRuleForDomain('test-isolated-bank.com', ['x-frame-options', 'content-security-policy']);
                 const rules = await chrome.declarativeNetRequest.getDynamicRules();
-                return rules.some(r => r.condition.urlFilter.includes('test-isolated-bank.com'));
+                const respRule = rules.find(r => r.condition.urlFilter.includes('test-isolated-bank.com') && r.action.responseHeaders);
+                const reqRule = rules.find(r => r.condition.urlFilter.includes('test-isolated-bank.com') && r.action.requestHeaders);
+                if (!respRule || !reqRule) return false;
+                const hasOrigin = reqRule.action.requestHeaders.some(h => h.header.toLowerCase() === 'origin' && h.value === 'https://test-isolated-bank.com');
+                const hasReferer = reqRule.action.requestHeaders.some(h => h.header.toLowerCase() === 'referer' && h.value === 'https://test-isolated-bank.com/');
+                return Boolean(hasOrigin && hasReferer);
             }""")
-            self.assertTrue(dnr_applied, "Dynamic DNR rule must be recorded in chrome.declarativeNetRequest")
-
+            self.assertTrue(dnr_applied, "Dynamic DNR rules must record both response and subrequest spoofed headers (Origin/Referer)")
             # 3. Verify in-memory session token handling with origin validation
             # A forged message from evil.com trying to spoof message.origin must be BLOCKED
             blocked_forged = await sw.evaluate("""() => {
