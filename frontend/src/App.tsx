@@ -331,7 +331,7 @@ export function App() {
             isBusy={isBusy}
             isReady={isIframeReady}
             modelName={modelName}
-            onSendMessage={(prompt) => sendMessage(prompt, currentUrl)}
+            onSendMessage={(prompt, attachments) => sendMessage(prompt, currentUrl, attachments)}
             onStopAgent={stopAgent}
             onClearChat={clearChat}
           />

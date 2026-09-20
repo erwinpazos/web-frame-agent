@@ -17,16 +17,24 @@ export interface AgentStep {
   current_url?: string
   current_title?: string
 }
+export interface ChatAttachment {
+  id: string
+  name: string
+  content: string
+  lineCount: number
+  charCount: number
+  size: string
+}
 
 export interface ChatMessage {
   id: string
   sender: 'user' | 'agent' | 'system'
   text?: string
+  attachments?: ChatAttachment[]
   steps?: AgentStep[]
   status?: 'thinking' | 'acting' | 'done' | 'error'
   isStreaming?: boolean
   timestamp: string
   targetUrl?: string
 }
-
 export type WebSocketStatus = 'connecting' | 'connected' | 'disconnected'
