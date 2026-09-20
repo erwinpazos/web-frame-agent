@@ -377,6 +377,25 @@ async def websocket_browser_use_endpoint(websocket: WebSocket, target_id: Option
 
                 elif method == "Page.navigate":
                     target_nav_url = params.get("url", "")
+                    # Prevent recursive navigation to host application URL
+                    from urllib.parse import urlparse
+                    try:
+                        parsed_nav = urlparse(target_nav_url)
+                        nav_host = parsed_nav.netloc.lower()
+                        frontend_host = urlparse(settings.frontend_url).netloc.lower()
+                        if nav_host in (frontend_host, f"{settings.backend_host}:{settings.backend_port}", "localhost:5173", "127.0.0.1:5173"):
+                            logger.warning(f"Blocked recursive navigation to host application URL: {target_nav_url}")
+                            await websocket.send_text(json.dumps({
+                                "id": msg_id,
+                                "error": {
+                                    "code": -32000,
+                                    "message": "Navigation to host workspace application URL is prohibited."
+                                }
+                            }))
+                            continue
+                    except Exception as parse_err:
+                        logger.warning(f"Error parsing navigation URL '{target_nav_url}': {parse_err}")
+
                     logger.info(f"Navigating workspace iframe to: {target_nav_url}")
                     cdp_bridge.active_tab_info["url"] = target_nav_url
                     if cdp_bridge.extension_ws:

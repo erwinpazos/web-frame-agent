@@ -41,8 +41,22 @@ export function App() {
 
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
+  const isHostWorkspaceDestination = (url: string): boolean => {
+    try {
+      const parsed = new URL(url)
+      return (
+        parsed.origin === window.location.origin ||
+        parsed.host === window.location.host ||
+        parsed.hostname === 'localhost' ||
+        parsed.hostname === '127.0.0.1'
+      )
+    } catch {
+      return false
+    }
+  }
+
   const handleAgentUrlChanged = (newUrl: string) => {
-    if (newUrl && newUrl !== currentUrlRef.current) {
+    if (newUrl && newUrl !== currentUrlRef.current && !isHostWorkspaceDestination(newUrl)) {
       currentUrlRef.current = newUrl
       setCurrentUrl(newUrl)
       setInputUrl(newUrl)
@@ -147,6 +161,10 @@ export function App() {
       dest = 'https://' + dest
     }
 
+    if (isHostWorkspaceDestination(dest)) {
+      return
+    }
+
     currentUrlRef.current = dest
     setCurrentUrl(dest)
     setInputUrl(dest)
@@ -156,7 +174,6 @@ export function App() {
       iframeRef.current.src = dest
     }
   }
-
   const handleReload = () => {
     if (iframeRef.current) {
       setIsLoadingIframe(true)

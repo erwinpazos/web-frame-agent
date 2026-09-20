@@ -171,6 +171,7 @@ class AgentService:
                 f"Task to accomplish: {prompt}\n"
                 "Interact directly with the displayed page to accomplish this task (clicks, text input, scrolling, any needed actions).\n"
                 "CRITICAL: Once you have completed the requested action or navigated to the destination page, call the 'done' tool immediately. Do not keep clicking or browsing needlessly.\n"
+                "CRITICAL INCEPTION GUARD: NEVER navigate to the host application URL (e.g. localhost:5173, 127.0.0.1:5173). The target website is the external web page loaded in the workspace.\n"
                 "Be concise, precise, and summarize what you accomplished in English."
             )
             step_count = 0
