@@ -93,6 +93,7 @@ cp .env.example .env
 
 Edit `backend/.env`:
 
+```bash
 # Target LLM provider: anthropic, openai, vertex, or ollama
 LLM_PROVIDER="anthropic"
 ANTHROPIC_API_KEY="sk-ant-your-key-here"

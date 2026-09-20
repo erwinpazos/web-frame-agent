@@ -220,6 +220,10 @@ export function Chatbot({
                       <ReactMarkdown
                         remarkPlugins={[remarkGfm]}
                         components={{
+                          h1: ({ ...props }) => <h1 className="text-sm font-semibold font-mono text-cyan-400 mt-3 mb-1.5 border-b border-[#1e2230] pb-1" {...props} />,
+                          h2: ({ ...props }) => <h2 className="text-xs font-semibold font-mono text-cyan-300 mt-2.5 mb-1" {...props} />,
+                          h3: ({ ...props }) => <h3 className="text-xs font-semibold text-slate-100 mt-2 mb-1" {...props} />,
+                          h4: ({ ...props }) => <h4 className="text-[11px] font-semibold text-slate-200 mt-1.5 mb-0.5" {...props} />,
                           p: ({ ...props }) => <p className="mb-2 last:mb-0 leading-relaxed text-slate-200 text-xs" {...props} />,
                           ul: ({ ...props }) => <ul className="list-disc pl-4 mb-2 space-y-1 text-xs text-slate-300" {...props} />,
                           ol: ({ ...props }) => <ol className="list-decimal pl-4 mb-2 space-y-1 text-xs text-slate-300" {...props} />,
