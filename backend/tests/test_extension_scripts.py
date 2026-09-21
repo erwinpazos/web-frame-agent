@@ -244,8 +244,8 @@ class TestExtensionScriptsInChromium(unittest.IsolatedAsyncioTestCase):
             dnr_applied = await sw.evaluate("""async () => {
                 await applyDnrRuleForDomain('test-isolated-bank.com', ['x-frame-options', 'content-security-policy']);
                 const rules = await chrome.declarativeNetRequest.getDynamicRules();
-                const respRule = rules.find(r => r.condition.urlFilter.includes('test-isolated-bank.com') && r.action.responseHeaders);
-                const reqRule = rules.find(r => r.condition.urlFilter.includes('test-isolated-bank.com') && r.action.requestHeaders);
+                const respRule = rules.find(r => r.condition.urlFilter && r.condition.urlFilter.includes('test-isolated-bank.com') && r.action.responseHeaders);
+                const reqRule = rules.find(r => r.condition.initiatorDomains && r.condition.initiatorDomains.includes('test-isolated-bank.com') && r.action.requestHeaders);
                 if (!respRule || !reqRule) return false;
                 const hasOrigin = reqRule.action.requestHeaders.some(h => h.header.toLowerCase() === 'origin' && h.value === 'https://test-isolated-bank.com');
                 const hasReferer = reqRule.action.requestHeaders.some(h => h.header.toLowerCase() === 'referer' && h.value === 'https://test-isolated-bank.com/');

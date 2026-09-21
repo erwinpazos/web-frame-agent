@@ -137,7 +137,11 @@ async function applyDnrRuleForDomain(domain, headersToStrip) {
       },
     };
 
-    // Rule 2: Spoof Origin & Referer ONLY on sub-requests (XHR, fetch, sub_frame), NEVER on top-level main_frame GET navigations
+    // Rule 2: Universal Origin & Referer spoofing for ANY sub-request (XHR, fetch, sub_frame, other)
+    // INITIATED by this domain, regardless of target destination (e.g. AWS S3, Google Cloud, external APIs).
+    // Using initiatorDomains instead of a destination urlFilter ensures all outgoing uploads and API calls
+    // carry the site's genuine Origin and Referer, exactly as in a standalone browser tab.
+    const initiatorList = Array.from(new Set([domainClean, apexDomain].filter(Boolean)));
     const requestRule = {
       id: requestRuleId,
       priority: 1,
@@ -146,11 +150,10 @@ async function applyDnrRuleForDomain(domain, headersToStrip) {
         requestHeaders,
       },
       condition: {
-        urlFilter: `||${filterDomain}`,
+        initiatorDomains: initiatorList,
         resourceTypes: ['sub_frame', 'xmlhttprequest', 'other'],
       },
     };
-
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: [ruleId, requestRuleId],
       addRules: [responseRule, requestRule],
