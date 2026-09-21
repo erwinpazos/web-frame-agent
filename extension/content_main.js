@@ -89,15 +89,62 @@
           lower.includes('appleid.apple.com') ||
           lower.includes('login.microsoftonline.com') ||
           lower.includes('github.com/login/oauth') ||
-          lower.includes('facebook.com/v') && lower.includes('/dialog/oauth')
+          (lower.includes('facebook.com/v') && lower.includes('/dialog/oauth'))
         );
+      };
+
+      // Universal detection of cloud storage buckets, blob endpoints, document downloads and file attachments.
+      // These URLs MUST NEVER navigate the workspace iframe, as doing so aborts the active job application form
+      // or triggers AWS S3 / GCS AccessDenied errors on private drop-box uploads.
+      const isDocumentOrStorageUrl = function(url) {
+        if (!url || typeof url !== 'string') return false;
+        try {
+          const lower = url.toLowerCase().trim();
+          if (lower.startsWith('blob:') || lower.startsWith('data:application/')) return true;
+
+          const parsed = new URL(url, window.location.href);
+          const hostname = parsed.hostname.toLowerCase();
+          const pathname = parsed.pathname.toLowerCase();
+
+          // 1. Cloud storage & object store domains (AWS S3, Google Cloud Storage, Azure Blob, R2, etc.)
+          if (
+            hostname.endsWith('.amazonaws.com') ||
+            hostname.endsWith('.googleapis.com') ||
+            hostname.endsWith('.blob.core.windows.net') ||
+            hostname.endsWith('.r2.cloudflarestorage.com') ||
+            (hostname.includes('supabase.co') && pathname.includes('/storage/')) ||
+            (hostname.includes('firebase') && pathname.includes('/storage')) ||
+            hostname.includes('backblazeb2.com') ||
+            hostname.includes('digitaloceanspaces.com')
+          ) {
+            return true;
+          }
+
+          // 2. Document & archive file extensions
+          const docExtensions = /\.(pdf|docx?|odt|rtf|txt|csv|xlsx?|pptx?|zip|tar|gz|rar|7z)$/i;
+          if (docExtensions.test(pathname)) {
+            return true;
+          }
+
+          // 3. Attachment download indicators
+          if (
+            parsed.searchParams.has('download') ||
+            (parsed.searchParams.get('response-content-disposition') || '').includes('attachment')
+          ) {
+            return true;
+          }
+
+          return false;
+        } catch (e) {
+          return false;
+        }
       };
 
       try {
         const originalWindowOpen = window.open;
         window.open = function(url, target, features) {
           if (url && typeof url === 'string') {
-            // OAuth providers fail with 403 or reject in-iframe rendering: delegate to native popup
+            // 1. OAuth providers fail with 403 or reject in-iframe rendering: delegate to native popup
             if (isAuthUrl(url)) {
               console.log('[CDP Bridge] OAuth portal detected, delegating to native popup:', url);
               const popupWin = originalWindowOpen.call(window, url, target || '_blank', features || 'width=520,height=640,menubar=no,toolbar=no');
@@ -119,6 +166,15 @@
               }
               return popupWin;
             }
+
+            // 2. Document previews, downloads, and cloud storage URLs: delegate to native tab/download
+            // to protect the active workspace iframe form from being overwritten by S3 AccessDenied or binary streams.
+            if (isDocumentOrStorageUrl(url)) {
+              console.log('[CDP Bridge] Document/Storage URL detected, delegating to native tab:', url);
+              return originalWindowOpen.call(window, url, target || '_blank', features);
+            }
+
+            // 3. Standard web pages: contain within the workspace iframe
             try {
               window.location.assign(url);
             } catch (err) {
@@ -136,11 +192,22 @@
             while (target && target.tagName !== 'A' && target.tagName !== 'AREA') {
               target = target.parentElement;
             }
-            if (target && target.href && isAuthUrl(target.href)) {
-              // Allow OAuth authentication links to open in external popup/tab
+            if (!target || !target.href) return;
+
+            // Allow OAuth authentication links to open in external popup/tab
+            if (isAuthUrl(target.href)) {
               return;
             }
-            if (target && (target.target === '_blank' || target.target === '_top' || target.target === '_parent')) {
+
+            // Document previews, downloads, and storage bucket links must NEVER navigate the iframe.
+            // Ensure they open in a separate tab or trigger native download, preserving the application form.
+            if (isDocumentOrStorageUrl(target.href) || target.hasAttribute('download')) {
+              target.target = '_blank';
+              return;
+            }
+
+            // General web links: contain navigation inside the workspace iframe
+            if (target.target === '_blank' || target.target === '_top' || target.target === '_parent') {
               target.target = '_self';
             }
           } catch (e) {}

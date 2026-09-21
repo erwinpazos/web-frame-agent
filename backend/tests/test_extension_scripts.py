@@ -96,6 +96,53 @@ class TestExtensionScriptsInChromium(unittest.IsolatedAsyncioTestCase):
             return link.target;
         }""")
         self.assertEqual(res, "_self", "Clicking target='_blank' must coerce target to _self")
+
+    async def test_document_and_s3_storage_url_window_open_delegates_to_native(self):
+        """Verify window.open with S3 / document URLs delegates to native tab instead of navigating current frame."""
+        page = await self.context.new_page()
+        await page.add_init_script(self.content_main_code)
+        await page.goto("https://example.com/form")
+
+        # Calling window.open with an S3 resume PDF delegates to native window.open without assigning frame location
+        delegated = await page.evaluate("""() => {
+            let openedUrl = null;
+            const original = window.open;
+            window.open = function(url) {
+                openedUrl = url;
+                return { closed: false };
+            };
+            const s3Url = 'https://ashbyhq-infra-prd-main-app-uploaded-files-us-east-1.s3.us-east-1.amazonaws.com/uploads/Resume.pdf';
+            window.open(s3Url, '_blank');
+            return openedUrl === s3Url;
+        }""")
+        self.assertTrue(delegated)
+        self.assertEqual(page.url, "https://example.com/form", "Page URL must remain on the form")
+
+    async def test_document_and_s3_storage_links_preserve_blank(self):
+        """Verify links pointing to S3 buckets, cloud storage, or document files retain target='_blank'."""
+        page = await self.context.new_page()
+        await page.add_init_script(self.content_main_code)
+        html = '''<!DOCTYPE html><html><body>
+            <a id="s3-link" href="https://mybucket.s3.amazonaws.com/cv.pdf" target="_blank">S3 PDF</a>
+            <a id="gcs-link" href="https://storage.googleapis.com/resumes/cv.docx">GCS DOCX</a>
+        </body></html>'''
+        await page.goto("data:text/html," + urllib.parse.quote(html))
+
+        res_s3 = await page.evaluate("""() => {
+            const link = document.getElementById('s3-link');
+            link.addEventListener('click', (e) => e.preventDefault(), false);
+            link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            return link.target;
+        }""")
+        self.assertEqual(res_s3, "_blank", "S3 document link must retain target='_blank'")
+
+        res_gcs = await page.evaluate("""() => {
+            const link = document.getElementById('gcs-link');
+            link.addEventListener('click', (e) => e.preventDefault(), false);
+            link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            return link.target;
+        }""")
+        self.assertEqual(res_gcs, "_blank", "GCS document link without target must be upgraded to target='_blank'")
     async def test_strip_meta_csp_tags(self):
         """Verify <meta http-equiv='Content-Security-Policy'> and X-Frame-Options are stripped immediately."""
         page = await self.context.new_page()
