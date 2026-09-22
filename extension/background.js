@@ -137,7 +137,11 @@ async function applyDnrRuleForDomain(domain, headersToStrip) {
       },
     };
 
-    // Rule 2: Spoof Origin & Referer ONLY on sub-requests (XHR, fetch, sub_frame), NEVER on top-level main_frame GET navigations
+    // Rule 2: Universal Origin & Referer spoofing for ANY sub-request (XHR, fetch, sub_frame, other)
+    // INITIATED by this domain, regardless of target destination (e.g. AWS S3, Google Cloud, external APIs).
+    // Using initiatorDomains instead of a destination urlFilter ensures all outgoing uploads and API calls
+    // carry the site's genuine Origin and Referer, exactly as in a standalone browser tab.
+    const initiatorList = Array.from(new Set([domainClean, apexDomain].filter(Boolean)));
     const requestRule = {
       id: requestRuleId,
       priority: 1,
@@ -146,11 +150,10 @@ async function applyDnrRuleForDomain(domain, headersToStrip) {
         requestHeaders,
       },
       condition: {
-        urlFilter: `||${filterDomain}`,
+        initiatorDomains: initiatorList,
         resourceTypes: ['sub_frame', 'xmlhttprequest', 'other'],
       },
     };
-
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: [ruleId, requestRuleId],
       addRules: [responseRule, requestRule],
@@ -323,6 +326,52 @@ function isHostWorkspaceUrl(url) {
     if (host === 'localhost:5173' || host === '127.0.0.1:5173') return true;
   } catch (e) {}
   return false;
+}
+// Universal detection of cloud storage buckets, blob endpoints, document downloads and file attachments.
+// These URLs MUST NEVER navigate the workspace iframe, as doing so aborts the active job application form
+// or triggers AWS S3 / GCS AccessDenied errors on private drop-box uploads.
+function isDocumentOrStorageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const lower = url.toLowerCase().trim();
+    if (lower.startsWith('blob:') || lower.startsWith('data:application/')) return true;
+
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+
+    // 1. Cloud storage & object store domains (AWS S3, Google Cloud Storage, Azure Blob, R2, etc.)
+    if (
+      hostname.endsWith('.amazonaws.com') ||
+      hostname.endsWith('.googleapis.com') ||
+      hostname.endsWith('.blob.core.windows.net') ||
+      hostname.endsWith('.r2.cloudflarestorage.com') ||
+      (hostname.includes('supabase.co') && pathname.includes('/storage/')) ||
+      (hostname.includes('firebase') && pathname.includes('/storage')) ||
+      hostname.includes('backblazeb2.com') ||
+      hostname.includes('digitaloceanspaces.com')
+    ) {
+      return true;
+    }
+
+    // 2. Document & archive file extensions
+    const docExtensions = /\.(pdf|docx?|odt|rtf|txt|csv|xlsx?|pptx?|zip|tar|gz|rar|7z)$/i;
+    if (docExtensions.test(pathname)) {
+      return true;
+    }
+
+    // 3. Attachment download indicators
+    if (
+      parsed.searchParams.has('download') ||
+      (parsed.searchParams.get('response-content-disposition') || '').includes('attachment')
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch (e) {
+    return false;
+  }
 }
 
 // Find host tab (workspace tab) - strictly matches the workspace tab, NEVER falls back to arbitrary active tabs
@@ -906,24 +955,6 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
               }
             }
           }
-        } else if (key.toLowerCase() === 'location') {
-          const loc = String(rawVal).trim();
-          // Filter out asset redirects (images, avatars like googleusercontent)
-          const isAssetRedirect = /\.(png|jpg|jpeg|gif|svg|webp|ico)(\?.*)?$/i.test(loc) || loc.includes('googleusercontent.com');
-          if (loc && !isAssetRedirect && iframeSessionId && hostTabId) {
-            const currentOrigin = (iframeTargetInfo && iframeTargetInfo.url) ? new URL(iframeTargetInfo.url).origin : 'https://the-internet.herokuapp.com';
-            const fullRedirectUrl = loc.startsWith('http') ? loc : new URL(loc, currentOrigin).href;
-            console.log(`[CDP Bridge] Following 302/303 Location redirect to: ${fullRedirectUrl}`);
-            // Wait 25ms to guarantee Network.setCookie is committed in Chromium before navigating
-            setTimeout(() => {
-              chrome.debugger.sendCommand(
-                { tabId: Number(hostTabId), sessionId: iframeSessionId },
-                'Page.navigate',
-                { url: fullRedirectUrl },
-                () => {}
-              );
-            }, 30);
-          }
         }
       }
     } catch (e) {
@@ -934,7 +965,8 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   // Follow document-level redirects on main frame navigations only (Network.requestWillBeSent with redirectResponse)
   if (method === 'Network.requestWillBeSent' && params && params.redirectResponse) {
     const isDocumentNav = params.type === 'Document' || (params.initiator && params.initiator.type === 'other');
-    if (isDocumentNav && params.documentURL && iframeSessionId && hostTabId) {
+    // Ensure document redirects never force the workspace iframe to navigate to raw storage buckets or downloads
+    if (isDocumentNav && params.documentURL && !isDocumentOrStorageUrl(params.documentURL) && iframeSessionId && hostTabId) {
       console.log(`[CDP Bridge] Document redirect detected: '${params.documentURL}'`);
       chrome.debugger.sendCommand(
         { tabId: Number(hostTabId), sessionId: iframeSessionId },

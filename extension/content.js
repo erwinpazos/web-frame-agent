@@ -66,11 +66,58 @@ document.addEventListener('DOMContentLoaded', detectAndRelayConfig);
 window.addEventListener('load', detectAndRelayConfig);
 // Content script injected into all frames to keep navigations inside the workspace iframe
 
-// 1. Override window.open to redirect within the same frame
+function isDocumentOrStorageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const lower = url.toLowerCase().trim();
+    if (lower.startsWith('blob:') || lower.startsWith('data:application/')) return true;
+
+    const parsed = new URL(url, window.location.href);
+    const hostname = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+
+    // 1. Cloud storage & object store domains (AWS S3, Google Cloud Storage, Azure Blob, R2, etc.)
+    if (
+      hostname.endsWith('.amazonaws.com') ||
+      hostname.endsWith('.googleapis.com') ||
+      hostname.endsWith('.blob.core.windows.net') ||
+      hostname.endsWith('.r2.cloudflarestorage.com') ||
+      (hostname.includes('supabase.co') && pathname.includes('/storage/')) ||
+      (hostname.includes('firebase') && pathname.includes('/storage')) ||
+      hostname.includes('backblazeb2.com') ||
+      hostname.includes('digitaloceanspaces.com')
+    ) {
+      return true;
+    }
+
+    // 2. Document & archive file extensions
+    const docExtensions = /\.(pdf|docx?|odt|rtf|txt|csv|xlsx?|pptx?|zip|tar|gz|rar|7z)$/i;
+    if (docExtensions.test(pathname)) {
+      return true;
+    }
+
+    // 3. Attachment download indicators
+    if (
+      parsed.searchParams.has('download') ||
+      (parsed.searchParams.get('response-content-disposition') || '').includes('attachment')
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 1. Override window.open to redirect within the same frame, EXCEPT for Auth and Document/Storage links
 try {
   const originalOpen = window.open;
   window.open = function(url, target, features) {
     if (url) {
+      if (isAuthPortalUrl(url) || isDocumentOrStorageUrl(url)) {
+        return originalOpen ? originalOpen.apply(window, arguments) : window;
+      }
       window.location.href = url;
       return window;
     }
@@ -122,8 +169,9 @@ function forceSameFrameNavigation(event) {
     const anchor = event.target && event.target.closest ? event.target.closest('a') : null;
     if (anchor) {
       const href = anchor.href || anchor.getAttribute('href') || '';
-      if (isAuthPortalUrl(href)) {
-        // Allow OAuth login portals to open in native popup/tab
+      // Allow OAuth login portals, document downloads, and cloud storage previews to open externally
+      if (isAuthPortalUrl(href) || isDocumentOrStorageUrl(href) || anchor.hasAttribute('download')) {
+        anchor.target = '_blank';
         return;
       }
       if (anchor.target && anchor.target.toLowerCase() !== '_self') {
