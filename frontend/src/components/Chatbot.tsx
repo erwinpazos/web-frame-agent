@@ -326,36 +326,43 @@ export function Chatbot({
                   )}
 
                   {/* Final Response Content */}
-                  {msg.text && (
+                  {(msg.text || msg.interrupted) && (
                     <div className="bg-[#141722] border border-[#1e2230] p-3 text-xs text-slate-200 leading-relaxed font-sans">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          h1: ({ ...props }) => <h1 className="text-sm font-semibold font-mono text-cyan-400 mt-3 mb-1.5 border-b border-[#1e2230] pb-1" {...props} />,
-                          h2: ({ ...props }) => <h2 className="text-xs font-semibold font-mono text-cyan-300 mt-2.5 mb-1" {...props} />,
-                          h3: ({ ...props }) => <h3 className="text-xs font-semibold text-slate-100 mt-2 mb-1" {...props} />,
-                          h4: ({ ...props }) => <h4 className="text-[11px] font-semibold text-slate-200 mt-1.5 mb-0.5" {...props} />,
-                          p: ({ ...props }) => <p className="mb-2 last:mb-0 leading-relaxed text-slate-200 text-xs" {...props} />,
-                          ul: ({ ...props }) => <ul className="list-disc pl-4 mb-2 space-y-1 text-xs text-slate-300" {...props} />,
-                          ol: ({ ...props }) => <ol className="list-decimal pl-4 mb-2 space-y-1 text-xs text-slate-300" {...props} />,
-                          li: ({ ...props }) => <li className="leading-relaxed" {...props} />,
-                          code: ({ className, children, ...props }) => {
-                            const match = /language-(\w+)/.exec(className || '')
-                            return match ? (
-                              <code className="block bg-[#090a0f] p-2 overflow-x-auto text-cyan-400 font-mono text-[11px] my-2 border border-[#1e2230]" {...props}>
-                                {children}
-                              </code>
-                            ) : (
-                              <code className="bg-[#090a0f] px-1 py-0.5 text-cyan-400 font-mono text-[11px] border border-[#1e2230]" {...props}>
-                                {children}
-                              </code>
-                            )
-                          },
-                          a: ({ ...props }) => <a className="text-cyan-400 hover:underline" target="_blank" rel="noopener noreferrer" {...props} />,
-                        }}
-                      >
-                        {msg.text}
-                      </ReactMarkdown>
+                      {msg.text && (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            h1: ({ ...props }) => <h1 className="text-sm font-semibold font-mono text-cyan-400 mt-3 mb-1.5 border-b border-[#1e2230] pb-1" {...props} />,
+                            h2: ({ ...props }) => <h2 className="text-xs font-semibold font-mono text-cyan-300 mt-2.5 mb-1" {...props} />,
+                            h3: ({ ...props }) => <h3 className="text-xs font-semibold text-slate-100 mt-2 mb-1" {...props} />,
+                            h4: ({ ...props }) => <h4 className="text-[11px] font-semibold text-slate-200 mt-1.5 mb-0.5" {...props} />,
+                            p: ({ ...props }) => <p className="mb-2 last:mb-0 leading-relaxed text-slate-200 text-xs" {...props} />,
+                            ul: ({ ...props }) => <ul className="list-disc pl-4 mb-2 space-y-1 text-xs text-slate-300" {...props} />,
+                            ol: ({ ...props }) => <ol className="list-decimal pl-4 mb-2 space-y-1 text-xs text-slate-300" {...props} />,
+                            li: ({ ...props }) => <li className="leading-relaxed" {...props} />,
+                            code: ({ className, children, ...props }) => {
+                              const match = /language-(\w+)/.exec(className || '')
+                              return match ? (
+                                <code className="block bg-[#090a0f] p-2 overflow-x-auto text-cyan-400 font-mono text-[11px] my-2 border border-[#1e2230]" {...props}>
+                                  {children}
+                                </code>
+                              ) : (
+                                <code className="bg-[#090a0f] px-1 py-0.5 text-cyan-400 font-mono text-[11px] border border-[#1e2230]" {...props}>
+                                  {children}
+                                </code>
+                              )
+                            },
+                            a: ({ ...props }) => <a className="text-cyan-400 hover:underline" target="_blank" rel="noopener noreferrer" {...props} />,
+                          }}
+                        >
+                          {msg.text}
+                        </ReactMarkdown>
+                      )}
+                      {msg.interrupted && (
+                        <p className={`text-[11px] italic text-[#8892b0] font-mono ${msg.text ? 'mt-2 pt-1.5 border-t border-[#1e2230]/70' : ''}`}>
+                          {msg.interruptedReason || 'Execution was interrupted by the user.'}
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>

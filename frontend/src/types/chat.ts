@@ -34,6 +34,8 @@ export interface ChatMessage {
   steps?: AgentStep[]
   status?: 'thinking' | 'acting' | 'done' | 'error'
   isStreaming?: boolean
+  interrupted?: boolean
+  interruptedReason?: string
   timestamp: string
   targetUrl?: string
 }

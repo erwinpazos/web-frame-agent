@@ -21,6 +21,7 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
   const sessionIdRef = useRef<string>(sessionId)
   const wsRef = useRef<WebSocket | null>(null)
   const activeAgentMsgIdRef = useRef<string | null>(null)
+  const activeTaskIdRef = useRef<string | null>(null)
   const onUrlChangedRef = useRef(onUrlChanged)
   const onIframeStatusRef = useRef(onIframeStatus)
   const authTokenRef = useRef(authToken)
@@ -33,7 +34,11 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
   const handleWebSocketMessage = useCallback((data: Record<string, unknown>) => {
     const type = typeof data.type === 'string' ? data.type : ''
 
-    if (type === 'agent_started') {
+    if (type === 'task_accepted') {
+      if (typeof data.task_id === 'string') {
+        activeTaskIdRef.current = data.task_id
+      }
+    } else if (type === 'agent_started') {
       setIsBusy(true)
       const activeId = activeAgentMsgIdRef.current
       if (activeId) {
@@ -44,6 +49,10 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
         )
       }
     } else if (type === 'agent_step') {
+      const stepTaskId = typeof data.task_id === 'string' ? data.task_id : null
+      if (stepTaskId && activeTaskIdRef.current && stepTaskId !== activeTaskIdRef.current) {
+        return
+      }
       const rawActions = Array.isArray(data.actions) ? data.actions : []
       const step: AgentStep = {
         step_number: typeof data.step_number === 'number' ? data.step_number : 0,
@@ -80,6 +89,10 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
         onUrlChangedRef.current(step.current_url)
       }
     } else if (type === 'agent_stream_chunk') {
+      const chunkTaskId = typeof data.task_id === 'string' ? data.task_id : null
+      if (chunkTaskId && activeTaskIdRef.current && chunkTaskId !== activeTaskIdRef.current) {
+        return
+      }
       const chunk = typeof data.chunk === 'string' ? data.chunk : ''
       if (chunk) {
         setMessages((prev) => {
@@ -99,24 +112,59 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
         })
       }
     } else if (type === 'agent_finished') {
+      const finishedTaskId = typeof data.task_id === 'string' ? data.task_id : null
+      if (finishedTaskId && activeTaskIdRef.current && finishedTaskId !== activeTaskIdRef.current) {
+        console.warn('Ignoring stale agent_finished event for cancelled task:', finishedTaskId)
+        return
+      }
       setIsBusy(false)
+      activeTaskIdRef.current = null
+      const isStopped = data.status === 'stopped'
       const resultText = typeof data.result === 'string' ? data.result : 'Task completed.'
       setMessages((prev) => {
         const targetId =
           activeAgentMsgIdRef.current ||
           [...prev].reverse().find((m) => m.sender === 'agent')?.id
         if (!targetId) return prev
-        return prev.map((msg) =>
-          msg.id === targetId
-            ? {
-                ...msg,
-                status: 'done',
-                isStreaming: false,
-                text: resultText || msg.text,
-              }
-            : msg
-        )
+        return prev.map((msg) => {
+          if (msg.id !== targetId) return msg
+          if (isStopped) {
+            return {
+              ...msg,
+              status: 'done',
+              isStreaming: false,
+              interrupted: true,
+              interruptedReason: resultText || 'Execution was interrupted by the user.',
+            }
+          }
+          return {
+            ...msg,
+            status: 'done',
+            isStreaming: false,
+            text: resultText || msg.text,
+          }
+        })
       })
+      activeAgentMsgIdRef.current = null
+    } else if (type === 'task_stopped') {
+      setIsBusy(false)
+      activeTaskIdRef.current = null
+      const targetId = activeAgentMsgIdRef.current
+      if (targetId) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === targetId
+              ? {
+                  ...msg,
+                  status: 'done',
+                  isStreaming: false,
+                  interrupted: true,
+                  interruptedReason: 'Execution was interrupted by the user.',
+                }
+              : msg
+          )
+        )
+      }
       activeAgentMsgIdRef.current = null
     } else if (type === 'agent_error') {
       setIsBusy(false)
@@ -169,6 +217,9 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
       ws.onopen = () => {
         if (!isDisposed) {
           setWsStatus('connected')
+          try {
+            ws?.send(JSON.stringify({ type: 'get_status' }))
+          } catch {}
         }
       }
 
@@ -185,13 +236,15 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
       ws.onerror = () => {
         if (!isDisposed) {
           setWsStatus('disconnected')
+          setIsBusy(false)
         }
       }
 
       ws.onclose = () => {
         if (!isDisposed) {
           setWsStatus('disconnected')
-          reconnectTimeout = window.setTimeout(connectWS, 3000)
+          setIsBusy(false)
+          reconnectTimeout = window.setTimeout(connectWS, 2000)
         }
       }
     }
@@ -289,15 +342,44 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
       )
     }
     setIsBusy(false)
+    const targetId = activeAgentMsgIdRef.current
+    if (targetId) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === targetId
+            ? {
+                ...msg,
+                status: 'done',
+                isStreaming: false,
+                interrupted: true,
+                interruptedReason: 'Execution was interrupted by the user.',
+              }
+            : msg
+        )
+      )
+    }
+    setIsBusy(false)
     activeAgentMsgIdRef.current = null
   }, [])
 
   const clearChat = useCallback(() => {
+    const newSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9)
+    sessionIdRef.current = newSessionId
+    activeTaskIdRef.current = null
+    activeAgentMsgIdRef.current = null
+    setIsBusy(false)
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(JSON.stringify({ type: 'clear_session' }))
+      } catch {}
+    }
+
     setMessages([
       {
         id: 'welcome-' + Date.now(),
         sender: 'system',
-        text: 'Chat history cleared.',
+        text: 'Chat history cleared. New session started.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       },
     ])
