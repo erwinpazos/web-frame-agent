@@ -190,8 +190,9 @@ class AgentService:
 
             async def on_step(state: BrowserStateSummary, model_output: AgentOutput, step_number: int):
                 nonlocal current_step_span
+                effective_step = step_count if step_count > 0 else (step_number or 1)
                 # 1. Step count safety cap
-                if step_number > settings.max_task_llm_steps:
+                if effective_step > settings.max_task_llm_steps:
                     raise RuntimeError(
                         f"budget_exceeded: Safety cap reached (max {settings.max_task_llm_steps} steps)."
                     )
@@ -233,7 +234,7 @@ class AgentService:
                 step_data = {
                     "type": "agent_step",
                     "task_id": task_id,
-                    "step_number": step_number,
+                    "step_number": effective_step,
                     "max_steps": min(max_steps, settings.max_task_llm_steps),
                     "thinking": model_output.thinking or "",
                     "current_url": reported_url,
@@ -241,7 +242,7 @@ class AgentService:
                     "next_goal": model_output.next_goal,
                     "cumulative_cost_usd": round(current_cost, 4),
                 }
-                logger.info(f"Agent step {step_number}/{max_steps} on {reported_url} (cost: ${current_cost:.4f})")
+                logger.info(f"Agent step {effective_step}/{max_steps} on {reported_url} (cost: ${current_cost:.4f})")
                 await self.broadcast(step_data)
 
             controller = Controller()
@@ -299,6 +300,10 @@ class AgentService:
                 )
                 self.active_agent.add_new_task(follow_up_instruction)
                 self.active_agent.register_new_step_callback = on_step
+                # Reset per-task step counter and failure counters so this task starts fresh at step 1
+                if hasattr(self.active_agent, "state"):
+                    self.active_agent.state.n_steps = 1
+                    self.active_agent.state.consecutive_failures = 0
             else:
                 self.active_session_id = session_id
                 logger.info(f"Initializing new agent session {session_id} on {ws_cdp_url}")
