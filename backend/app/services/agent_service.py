@@ -291,7 +291,6 @@ class AgentService:
                 )
                 self.active_agent.add_new_task(follow_up_instruction)
                 self.active_agent.register_new_step_callback = on_step
-                self.active_agent.settings.max_steps = max_steps
             else:
                 self.active_session_id = session_id
                 cdp_url = f"http://{settings.backend_host}:{settings.backend_port}/api/v1/cdp"
@@ -312,7 +311,6 @@ class AgentService:
                     llm=llm,
                     browser=self.active_browser,
                     controller=controller,
-                    max_steps=max_steps,
                     register_new_step_callback=on_step,
                     use_vision=True,
                 )
