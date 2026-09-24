@@ -282,8 +282,16 @@ class AgentService:
                 and self.active_browser is not None
             )
 
+            ws_cdp_url = f"ws://{settings.backend_host}:{settings.backend_port}/api/v1/cdp/devtools/browser?token={settings.api_token}"
+
             if is_follow_up:
                 logger.info(f"Continuing existing agent session {session_id} with follow-up task: '{prompt[:40]}...'")
+                # Ensure the browser session uses the authenticated master token WebSocket URL
+                if self.active_browser and hasattr(self.active_browser, "browser_profile"):
+                    self.active_browser.browser_profile.cdp_url = ws_cdp_url
+                if hasattr(self.active_agent, "browser_session") and hasattr(self.active_agent.browser_session, "browser_profile"):
+                    self.active_agent.browser_session.browser_profile.cdp_url = ws_cdp_url
+
                 follow_up_instruction = (
                     f"User instruction: {prompt}\n"
                     "If the user asks a question about the conversation, past actions, or history, answer directly using your memory and call the 'done' tool with your answer. "
@@ -293,11 +301,11 @@ class AgentService:
                 self.active_agent.register_new_step_callback = on_step
             else:
                 self.active_session_id = session_id
-                cdp_url = f"http://{settings.backend_host}:{settings.backend_port}/api/v1/cdp"
-                logger.info(f"Initializing new agent session {session_id} on {cdp_url}")
+                logger.info(f"Initializing new agent session {session_id} on {ws_cdp_url}")
                 if not self.active_browser:
-                    self.active_browser = Browser(cdp_url=cdp_url)
-
+                    self.active_browser = Browser(cdp_url=ws_cdp_url)
+                else:
+                    self.active_browser.browser_profile.cdp_url = ws_cdp_url
                 full_task = (
                     "The target web page is already loaded and displayed in the workspace on the right side of the screen.\n"
                     f"Task to accomplish: {prompt}\n"
