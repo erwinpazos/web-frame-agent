@@ -119,27 +119,52 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
       }
       setIsBusy(false)
       activeTaskIdRef.current = null
+      const isStopped = data.status === 'stopped'
       const resultText = typeof data.result === 'string' ? data.result : 'Task completed.'
       setMessages((prev) => {
         const targetId =
           activeAgentMsgIdRef.current ||
           [...prev].reverse().find((m) => m.sender === 'agent')?.id
         if (!targetId) return prev
-        return prev.map((msg) =>
-          msg.id === targetId
-            ? {
-                ...msg,
-                status: 'done',
-                isStreaming: false,
-                text: resultText || msg.text,
-              }
-            : msg
-        )
+        return prev.map((msg) => {
+          if (msg.id !== targetId) return msg
+          if (isStopped) {
+            return {
+              ...msg,
+              status: 'done',
+              isStreaming: false,
+              interrupted: true,
+              interruptedReason: resultText || 'Execution was interrupted by the user.',
+            }
+          }
+          return {
+            ...msg,
+            status: 'done',
+            isStreaming: false,
+            text: resultText || msg.text,
+          }
+        })
       })
       activeAgentMsgIdRef.current = null
     } else if (type === 'task_stopped') {
       setIsBusy(false)
       activeTaskIdRef.current = null
+      const targetId = activeAgentMsgIdRef.current
+      if (targetId) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === targetId
+              ? {
+                  ...msg,
+                  status: 'done',
+                  isStreaming: false,
+                  interrupted: true,
+                  interruptedReason: 'Execution was interrupted by the user.',
+                }
+              : msg
+          )
+        )
+      }
       activeAgentMsgIdRef.current = null
     } else if (type === 'agent_error') {
       setIsBusy(false)
@@ -314,6 +339,23 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
         JSON.stringify({
           type: 'stop_task',
         })
+      )
+    }
+    setIsBusy(false)
+    const targetId = activeAgentMsgIdRef.current
+    if (targetId) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === targetId
+            ? {
+                ...msg,
+                status: 'done',
+                isStreaming: false,
+                interrupted: true,
+                interruptedReason: 'Execution was interrupted by the user.',
+              }
+            : msg
+        )
       )
     }
     setIsBusy(false)

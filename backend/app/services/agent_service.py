@@ -163,46 +163,6 @@ class AgentService:
                     f"Open chrome://extensions, click 'Refresh' on the extension, then reload {settings.frontend_url}."
                 )
 
-            is_follow_up = (
-                self.active_agent is not None
-                and self.active_session_id == session_id
-                and self.active_browser is not None
-            )
-
-            if is_follow_up:
-                logger.info(f"Continuing existing agent session {session_id} with follow-up task: '{prompt[:40]}...'")
-                follow_up_instruction = (
-                    f"User instruction: {prompt}\n"
-                    "If the user asks a question about the conversation, past actions, or history, answer directly using your memory and call the 'done' tool with your answer. "
-                    "If the user asks for a browser action, interact directly with the displayed web page, and call the 'done' tool once completed."
-                )
-                self.active_agent.add_new_task(follow_up_instruction)
-                self.active_agent.register_new_step_callback = on_step
-                self.active_agent.settings.max_steps = max_steps
-            else:
-                self.active_session_id = session_id
-                cdp_url = f"http://{settings.backend_host}:{settings.backend_port}/api/v1/cdp"
-                logger.info(f"Initializing new agent session {session_id} on {cdp_url}")
-                if not self.active_browser:
-                    self.active_browser = Browser(cdp_url=cdp_url)
-
-                full_task = (
-                    "The target web page is already loaded and displayed in the workspace on the right side of the screen.\n"
-                    f"Task to accomplish: {prompt}\n"
-                    "Interact directly with the displayed page to accomplish this task (clicks, text input, scrolling, any needed actions).\n"
-                    "CRITICAL: Once you have completed the requested action or navigated to the destination page, call the 'done' tool immediately. Do not keep clicking or browsing needlessly.\n"
-                    "CRITICAL INCEPTION GUARD: NEVER navigate to the host application URL (e.g. localhost:5173, 127.0.0.1:5173). The target website is the external web page loaded in the workspace.\n"
-                    "Be concise, precise, and summarize what you accomplished in English."
-                )
-                self.active_agent = Agent(
-                    task=full_task,
-                    llm=llm,
-                    browser=self.active_browser,
-                    controller=controller,
-                    max_steps=max_steps,
-                    register_new_step_callback=on_step,
-                    use_vision=True,
-                )
             step_count = 0
             current_step_span = None
 
@@ -283,6 +243,7 @@ class AgentService:
                 }
                 logger.info(f"Agent step {step_number}/{max_steps} on {reported_url} (cost: ${current_cost:.4f})")
                 await self.broadcast(step_data)
+
             controller = Controller()
 
             @controller.action("probe_and_unlock_iframe")
@@ -315,6 +276,46 @@ class AgentService:
                     logger.error(f"[Agent Tool] Error in probe_and_unlock_iframe for {url}: {e}", exc_info=True)
                     return f"Error probing iframe for {url}: {e}"
 
+            is_follow_up = (
+                self.active_agent is not None
+                and self.active_session_id == session_id
+                and self.active_browser is not None
+            )
+
+            if is_follow_up:
+                logger.info(f"Continuing existing agent session {session_id} with follow-up task: '{prompt[:40]}...'")
+                follow_up_instruction = (
+                    f"User instruction: {prompt}\n"
+                    "If the user asks a question about the conversation, past actions, or history, answer directly using your memory and call the 'done' tool with your answer. "
+                    "If the user asks for a browser action, interact directly with the displayed web page, and call the 'done' tool once completed."
+                )
+                self.active_agent.add_new_task(follow_up_instruction)
+                self.active_agent.register_new_step_callback = on_step
+                self.active_agent.settings.max_steps = max_steps
+            else:
+                self.active_session_id = session_id
+                cdp_url = f"http://{settings.backend_host}:{settings.backend_port}/api/v1/cdp"
+                logger.info(f"Initializing new agent session {session_id} on {cdp_url}")
+                if not self.active_browser:
+                    self.active_browser = Browser(cdp_url=cdp_url)
+
+                full_task = (
+                    "The target web page is already loaded and displayed in the workspace on the right side of the screen.\n"
+                    f"Task to accomplish: {prompt}\n"
+                    "Interact directly with the displayed page to accomplish this task (clicks, text input, scrolling, any needed actions).\n"
+                    "CRITICAL: Once you have completed the requested action or navigated to the destination page, call the 'done' tool immediately. Do not keep clicking or browsing needlessly.\n"
+                    "CRITICAL INCEPTION GUARD: NEVER navigate to the host application URL (e.g. localhost:5173, 127.0.0.1:5173). The target website is the external web page loaded in the workspace.\n"
+                    "Be concise, precise, and summarize what you accomplished in English."
+                )
+                self.active_agent = Agent(
+                    task=full_task,
+                    llm=llm,
+                    browser=self.active_browser,
+                    controller=controller,
+                    max_steps=max_steps,
+                    register_new_step_callback=on_step,
+                    use_vision=True,
+                )
 
             history = await self.active_agent.run(max_steps=max_steps, on_step_start=on_step_start)
             final_result = history.final_result() or "Task completed successfully."
