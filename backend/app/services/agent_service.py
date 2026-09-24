@@ -26,6 +26,7 @@ class AgentService:
         self.active_task_id: Optional[str] = None
         self.active_agent: Optional[Agent] = None
         self.active_browser: Optional[Browser] = None
+        self.active_session_id: Optional[str] = None
         self.is_running: bool = False
         self._current_task: Optional[asyncio.Task] = None
         self._subscribers: Set[asyncio.Queue] = set()
@@ -162,18 +163,46 @@ class AgentService:
                     f"Open chrome://extensions, click 'Refresh' on the extension, then reload {settings.frontend_url}."
                 )
 
-            cdp_url = f"http://{settings.backend_host}:{settings.backend_port}/api/v1/cdp"
-            logger.info(f"Using Chrome Extension CDP Bridge on {cdp_url} (no separate window)")
-            self.active_browser = Browser(cdp_url=cdp_url)
-            # Combined instruction - omit raw URL to prevent browser-use from injecting an auto-navigate action
-            full_task = (
-                "The target web page is already loaded and displayed in the workspace on the right side of the screen.\n"
-                f"Task to accomplish: {prompt}\n"
-                "Interact directly with the displayed page to accomplish this task (clicks, text input, scrolling, any needed actions).\n"
-                "CRITICAL: Once you have completed the requested action or navigated to the destination page, call the 'done' tool immediately. Do not keep clicking or browsing needlessly.\n"
-                "CRITICAL INCEPTION GUARD: NEVER navigate to the host application URL (e.g. localhost:5173, 127.0.0.1:5173). The target website is the external web page loaded in the workspace.\n"
-                "Be concise, precise, and summarize what you accomplished in English."
+            is_follow_up = (
+                self.active_agent is not None
+                and self.active_session_id == session_id
+                and self.active_browser is not None
             )
+
+            if is_follow_up:
+                logger.info(f"Continuing existing agent session {session_id} with follow-up task: '{prompt[:40]}...'")
+                follow_up_instruction = (
+                    f"User instruction: {prompt}\n"
+                    "If the user asks a question about the conversation, past actions, or history, answer directly using your memory and call the 'done' tool with your answer. "
+                    "If the user asks for a browser action, interact directly with the displayed web page, and call the 'done' tool once completed."
+                )
+                self.active_agent.add_new_task(follow_up_instruction)
+                self.active_agent.register_new_step_callback = on_step
+                self.active_agent.settings.max_steps = max_steps
+            else:
+                self.active_session_id = session_id
+                cdp_url = f"http://{settings.backend_host}:{settings.backend_port}/api/v1/cdp"
+                logger.info(f"Initializing new agent session {session_id} on {cdp_url}")
+                if not self.active_browser:
+                    self.active_browser = Browser(cdp_url=cdp_url)
+
+                full_task = (
+                    "The target web page is already loaded and displayed in the workspace on the right side of the screen.\n"
+                    f"Task to accomplish: {prompt}\n"
+                    "Interact directly with the displayed page to accomplish this task (clicks, text input, scrolling, any needed actions).\n"
+                    "CRITICAL: Once you have completed the requested action or navigated to the destination page, call the 'done' tool immediately. Do not keep clicking or browsing needlessly.\n"
+                    "CRITICAL INCEPTION GUARD: NEVER navigate to the host application URL (e.g. localhost:5173, 127.0.0.1:5173). The target website is the external web page loaded in the workspace.\n"
+                    "Be concise, precise, and summarize what you accomplished in English."
+                )
+                self.active_agent = Agent(
+                    task=full_task,
+                    llm=llm,
+                    browser=self.active_browser,
+                    controller=controller,
+                    max_steps=max_steps,
+                    register_new_step_callback=on_step,
+                    use_vision=True,
+                )
             step_count = 0
             current_step_span = None
 
@@ -286,15 +315,7 @@ class AgentService:
                     logger.error(f"[Agent Tool] Error in probe_and_unlock_iframe for {url}: {e}", exc_info=True)
                     return f"Error probing iframe for {url}: {e}"
 
-            self.active_agent = Agent(
-                task=full_task,
-                llm=llm,
-                browser=self.active_browser,
-                controller=controller,
-                max_steps=max_steps,
-                register_new_step_callback=on_step,
-                use_vision=True,
-            )
+
             history = await self.active_agent.run(max_steps=max_steps, on_step_start=on_step_start)
             final_result = history.final_result() or "Task completed successfully."
             is_successful = history.is_successful()
@@ -425,17 +446,8 @@ class AgentService:
             set_current_span(None)
             set_current_trace_id(None)
             set_current_session_id(None)
-            async with self._lock:
-                self.is_running = False
-                self.active_task_id = None
-                self.active_agent = None
-                if self.active_browser:
-                    try:
-                        await self.active_browser.close()
-                    except Exception as e:
-                        logger.warning(f"Error closing browser: {e}")
-                    finally:
-                        self.active_browser = None
+            self.is_running = False
+            self.active_task_id = None
     async def stop_task(self) -> bool:
         """Interrupts the currently active agent task."""
         async with self._lock:
@@ -447,22 +459,48 @@ class AgentService:
             task_to_cancel = self._current_task
             self._current_task = None
             task_to_cancel.cancel()
+
+            # Signal internal agent stop so its execution loop breaks immediately
+            if self.active_agent:
+                try:
+                    self.active_agent.stop()
+                except Exception:
+                    pass
+
             try:
-                await asyncio.wait_for(asyncio.shield(task_to_cancel), timeout=2.0)
+                await asyncio.wait_for(asyncio.shield(task_to_cancel), timeout=1.5)
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
             except Exception as e:
                 logger.warning(f"Error while waiting for task cancellation: {e}")
 
             self.active_task_id = None
+            # Note: self.active_agent and self.active_browser are intentionally preserved
+            # to maintain multi-turn memory and session continuity for subsequent prompts.
+            return True
+
+    async def reset_session(self) -> None:
+        """Explicitly resets the agent conversation and closes the browser session."""
+        async with self._lock:
+            if self.is_running and self._current_task:
+                self._current_task.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(self._current_task), timeout=1.0)
+                except Exception:
+                    pass
+            self.is_running = False
+            self.active_task_id = None
             self.active_agent = None
+            self.active_session_id = None
             if self.active_browser:
                 try:
-                    await asyncio.wait_for(self.active_browser.close(), timeout=1.5)
+                    await asyncio.wait_for(self.active_browser.close(), timeout=1.0)
                 except Exception as e:
-                    logger.warning(f"Error closing browser on stop: {e}")
+                    logger.warning(f"Error closing browser on session reset: {e}")
                 finally:
                     self.active_browser = None
+
+            logger.info("Agent session and browser cleanly reset.")
 
             return True
 

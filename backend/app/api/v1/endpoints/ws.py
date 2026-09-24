@@ -109,6 +109,13 @@ async def websocket_chat_endpoint(websocket: WebSocket):
                                 "url": cdp_bridge.active_tab_info.get("url"),
                             })
                         )
+                    elif msg_type == "clear_session":
+                        await agent_service.reset_session()
+                        await websocket.send_text(
+                            json.dumps({
+                                "type": "session_cleared",
+                            })
+                        )
 
                 except json.JSONDecodeError:
                     logger.warning("Received invalid JSON on WebSocket")

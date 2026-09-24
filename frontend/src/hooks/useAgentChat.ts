@@ -321,11 +321,23 @@ export function useAgentChat({ onUrlChanged, onIframeStatus, authToken }: UseAge
   }, [])
 
   const clearChat = useCallback(() => {
+    const newSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9)
+    sessionIdRef.current = newSessionId
+    activeTaskIdRef.current = null
+    activeAgentMsgIdRef.current = null
+    setIsBusy(false)
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      try {
+        wsRef.current.send(JSON.stringify({ type: 'clear_session' }))
+      } catch {}
+    }
+
     setMessages([
       {
         id: 'welcome-' + Date.now(),
         sender: 'system',
-        text: 'Chat history cleared.',
+        text: 'Chat history cleared. New session started.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       },
     ])
