@@ -351,7 +351,10 @@ class AgentService:
                         output="Execution was interrupted by the user.",
                         metadata={"status": "stopped"},
                     )
-                    await asyncio.to_thread(langfuse_client.flush)
+                    try:
+                        await asyncio.wait_for(asyncio.to_thread(langfuse_client.flush), timeout=0.5)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -440,20 +443,22 @@ class AgentService:
                 return False
 
             logger.info(f"Stopping agent task {self.active_task_id}...")
-            self._current_task.cancel()
+            self.is_running = False
+            task_to_cancel = self._current_task
+            self._current_task = None
+            task_to_cancel.cancel()
             try:
-                await self._current_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(task_to_cancel), timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
             except Exception as e:
                 logger.warning(f"Error while waiting for task cancellation: {e}")
 
-            self.is_running = False
             self.active_task_id = None
             self.active_agent = None
             if self.active_browser:
                 try:
-                    await self.active_browser.close()
+                    await asyncio.wait_for(self.active_browser.close(), timeout=1.5)
                 except Exception as e:
                     logger.warning(f"Error closing browser on stop: {e}")
                 finally:

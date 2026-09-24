@@ -5,6 +5,7 @@ from app.services.agent_service import agent_service
 from app.core.logger import logger
 from app.core.config import settings
 from app.core.security import authenticate_websocket, check_task_rate_limit
+from app.api.v1.endpoints.cdp_bridge import cdp_bridge
 
 router = APIRouter(tags=["WebSocket"])
 
@@ -18,6 +19,18 @@ async def websocket_chat_endpoint(websocket: WebSocket):
     logger.info("WebSocket client connected to /ws/chat (authenticated)")
     queue = agent_service.subscribe()
 
+    # Immediately inform newly connected or reconnected client of current iframe status
+    if cdp_bridge.is_iframe_ready:
+        try:
+            await websocket.send_text(
+                json.dumps({
+                    "type": "iframe_status",
+                    "iframe_ready": True,
+                    "url": cdp_bridge.active_tab_info.get("url") or settings.default_target_url,
+                })
+            )
+        except Exception:
+            pass
     async def sender():
         """Forwards all broadcasted events from the agent service to this client."""
         try:
@@ -62,6 +75,7 @@ async def websocket_chat_endpoint(websocket: WebSocket):
                                     max_steps=max_steps,
                                     headless=headless,
                                 )
+                                logger.info(f"Accepted task {task_id} via WebSocket (prompt='{prompt[:40]}...')")
                                 await websocket.send_text(
                                     json.dumps({
                                         "type": "task_accepted",
@@ -69,6 +83,7 @@ async def websocket_chat_endpoint(websocket: WebSocket):
                                     })
                                 )
                             except Exception as err:
+                                logger.warning(f"Failed to start task from WebSocket: {err}")
                                 err_payload = {
                                     "type": "agent_error",
                                     "error": str(err),
@@ -84,6 +99,14 @@ async def websocket_chat_endpoint(websocket: WebSocket):
                             json.dumps({
                                 "type": "task_stopped",
                                 "success": stopped,
+                            })
+                        )
+                    elif msg_type == "get_status":
+                        await websocket.send_text(
+                            json.dumps({
+                                "type": "iframe_status",
+                                "iframe_ready": cdp_bridge.is_iframe_ready,
+                                "url": cdp_bridge.active_tab_info.get("url"),
                             })
                         )
 
