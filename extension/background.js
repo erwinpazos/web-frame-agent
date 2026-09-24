@@ -962,20 +962,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     }
   }
 
-  // Follow document-level redirects on main frame navigations only (Network.requestWillBeSent with redirectResponse)
-  if (method === 'Network.requestWillBeSent' && params && params.redirectResponse) {
-    const isDocumentNav = params.type === 'Document' || (params.initiator && params.initiator.type === 'other');
-    // Ensure document redirects never force the workspace iframe to navigate to raw storage buckets or downloads
-    if (isDocumentNav && params.documentURL && !isDocumentOrStorageUrl(params.documentURL) && iframeSessionId && hostTabId) {
-      console.log(`[CDP Bridge] Document redirect detected: '${params.documentURL}'`);
-      chrome.debugger.sendCommand(
-        { tabId: Number(hostTabId), sessionId: iframeSessionId },
-        'Page.navigate',
-        { url: params.documentURL },
-        () => {}
-      );
-    }
-  }
+
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
@@ -1043,6 +1030,11 @@ chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
   if (!message || typeof message !== 'object') return;
 
   if (message.type === 'IFRAME_URL_CHANGED') {
+    // CRITICAL: Prevent cross-tab leakage!
+    // Ignore iframe navigation events from any tab other than the active workspace host tab.
+    if (!sender.tab || !hostTabId || Number(sender.tab.id) !== Number(hostTabId)) {
+      return;
+    }
     const liveUrl = message.url;
     const liveTitle = message.title || '';
     if (!liveUrl || liveUrl.startsWith('about:')) {
@@ -1078,6 +1070,10 @@ chrome.runtime.onMessage.addListener((message, sender, _sendResponse) => {
     return;
   }
   if (message.type === 'FRAME_RENDER_FAILURE') {
+    // Ignore render failure reports from outside the host workspace tab
+    if (!sender.tab || !hostTabId || Number(sender.tab.id) !== Number(hostTabId)) {
+      return;
+    }
     const failedUrl = message.url || '';
     const failureMode = message.mode || 'unknown';
     console.warn(`[CDP Bridge] Received FRAME_RENDER_FAILURE (${failureMode}) on:`, failedUrl);
