@@ -4,10 +4,38 @@
 (function() {
   'use strict';
 
+  // Capture pristine native window hierarchy references before applying any patch descriptors
+  let nativeParent = window.parent;
+  let nativeTop = window.top;
+  try {
+    nativeParent = window.parent;
+    nativeTop = window.top;
+  } catch (e) {}
+
+  const isDirectWorkspaceChild = window !== nativeTop && nativeParent === nativeTop;
+  const isSubFrame = nativeParent !== nativeTop;
+
   // Named patch catalog with closed whitelist enforcement
   const PATCHES = {
     // 1. Spoof window hierarchy (AWS WAF / Cloudflare frame checks: window.top !== window.self, window.parent, window.frameElement)
     'spoof-top-hierarchy': function() {
+      // CRITICAL: If we are in a nested sub-frame (hCaptcha, reCAPTCHA, Cloudflare Turnstile, Stripe, widgets),
+      // NEVER spoof window.parent! Sub-frames strictly require legitimate window.parent to communicate
+      // with their host application form (e.g. hCaptcha throws "Source and target contexts should differ"
+      // if window.parent === window).
+      if (isSubFrame) {
+        try {
+          // For a sub-frame, the legitimate top-level application context is its direct parent (the workspace page)
+          Object.defineProperty(window, 'top', {
+            get: function() { return nativeParent; },
+            set: function() {},
+            configurable: true,
+          });
+        } catch (e) {}
+        return;
+      }
+
+      // If we are the direct workspace child (Level 1 iframe), apply anti-framebusting spoofing
       try {
         Object.defineProperty(window, 'top', {
           get: function() { return window; },
@@ -15,7 +43,6 @@
           configurable: true,
         });
       } catch (e) {}
-
       try {
         Object.defineProperty(window, 'parent', {
           get: function() { return window; },
@@ -297,12 +324,11 @@
   try {
     const notifyParentOfNavigation = () => {
       try {
-        const isDirectChild = window !== window.top && window.parent === window.top;
-        if (isDirectChild && window.location && window.location.href) {
+        if (isDirectWorkspaceChild && window.location && window.location.href) {
           const liveUrl = window.location.href;
           if (!liveUrl || liveUrl.startsWith('about:')) return;
           const liveTitle = document.title || '';
-          window.parent.postMessage({
+          nativeParent.postMessage({
             type: 'COBROWSE_IFRAME_NAVIGATED',
             url: liveUrl,
             title: liveTitle,
