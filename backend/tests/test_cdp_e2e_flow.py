@@ -222,5 +222,150 @@ class TestCDPBridgeE2E(unittest.IsolatedAsyncioTestCase):
 
             ext_task.cancel()
             await asyncio.gather(ext_task, return_exceptions=True)
+    async def test_child_oopif_target_discovery_and_command_routing(self):
+        """Verifies multi-target OOPiF registration, Target.getTargets, Target.attachToTarget and command routing."""
+        ext_ws = MockWebSocket()
+        bu_ws = MockWebSocket()
+
+        with patch("app.api.v1.endpoints.cdp_bridge.authenticate_websocket", return_value=True):
+            ext_task = asyncio.create_task(websocket_extension_endpoint(ext_ws))
+            bu_task = asyncio.create_task(websocket_browser_use_endpoint(bu_ws))
+            await asyncio.sleep(0.01)
+
+            # 1. Extension registers root workspace iframe session
+            await ext_ws.in_queue.put(json.dumps({
+                "type": "tab_info",
+                "tabId": 1234,
+                "targetId": "tab-1234",
+                "url": "https://elevenlabs.io/careers/test-job",
+                "title": "Careers at ElevenLabs",
+            }))
+            await ext_ws.in_queue.put(json.dumps({
+                "type": "iframe_info",
+                "sessionId": "root-workspace-session-111",
+                "targetId": "target-elevenlabs-root",
+                "url": "https://elevenlabs.io/careers/test-job",
+                "title": "Careers at ElevenLabs",
+            }))
+            await asyncio.sleep(0.01)
+
+            # 2. Child OOPiF iframe (Ashby) attaches in Chrome extension
+            await ext_ws.in_queue.put(json.dumps({
+                "method": "Target.attachedToTarget",
+                "params": {
+                    "sessionId": "session-child-ashby-999",
+                    "targetInfo": {
+                        "targetId": "target-child-ashby-999",
+                        "type": "iframe",
+                        "url": "https://jobs.ashbyhq.com/elevenlabs/test-job/application",
+                        "title": "Job Application",
+                        "attached": True,
+                    },
+                    "waitingForDebugger": False,
+                },
+                "sessionId": "session-child-ashby-999",
+            }))
+
+            # Verify Target.attachedToTarget is forwarded to browser-use with real child sessionId
+            fwd_attach_raw = await asyncio.wait_for(bu_ws.out_queue.get(), timeout=2.0)
+            fwd_attach = json.loads(fwd_attach_raw)
+            self.assertEqual(fwd_attach["method"], "Target.attachedToTarget")
+            self.assertEqual(fwd_attach["params"]["sessionId"], "session-child-ashby-999")
+            self.assertEqual(fwd_attach["params"]["targetInfo"]["targetId"], "target-child-ashby-999")
+            self.assertIn("target-child-ashby-999", cdp_bridge.child_targets)
+
+            # 3. Browser-Use queries Target.getTargets: must list root target AND child target
+            await bu_ws.in_queue.put(json.dumps({
+                "id": 10,
+                "method": "Target.getTargets",
+            }))
+            targets_resp_raw = await asyncio.wait_for(bu_ws.out_queue.get(), timeout=2.0)
+            targets_resp = json.loads(targets_resp_raw)
+            self.assertEqual(targets_resp["id"], 10)
+            target_ids = [t["targetId"] for t in targets_resp["result"]["targetInfos"]]
+            self.assertIn("target-elevenlabs-root", target_ids)
+            self.assertIn("target-child-ashby-999", target_ids)
+
+            # 4. Browser-Use calls Target.attachToTarget for the child target
+            await bu_ws.in_queue.put(json.dumps({
+                "id": 11,
+                "method": "Target.attachToTarget",
+                "params": {"targetId": "target-child-ashby-999"},
+            }))
+            attach_cmd_resp_raw = await asyncio.wait_for(bu_ws.out_queue.get(), timeout=2.0)
+            attach_cmd_resp = json.loads(attach_cmd_resp_raw)
+            self.assertEqual(attach_cmd_resp["id"], 11)
+            self.assertEqual(attach_cmd_resp["result"]["sessionId"], "session-child-ashby-999")
+
+            # Consume the synthetic attachedToTarget event
+            synthetic_evt_raw = await asyncio.wait_for(bu_ws.out_queue.get(), timeout=2.0)
+            synthetic_evt = json.loads(synthetic_evt_raw)
+            self.assertEqual(synthetic_evt["method"], "Target.attachedToTarget")
+            self.assertEqual(synthetic_evt["params"]["sessionId"], "session-child-ashby-999")
+
+            # 5. Browser-Use dispatches DOMSnapshot.captureSnapshot specifically for the child iframe
+            await bu_ws.in_queue.put(json.dumps({
+                "id": 12,
+                "method": "DOMSnapshot.captureSnapshot",
+                "params": {"computedStyles": []},
+                "sessionId": "session-child-ashby-999",
+            }))
+
+            # Extension must receive the command with the exact child sessionId intact!
+            ext_cmd_raw = await asyncio.wait_for(ext_ws.out_queue.get(), timeout=2.0)
+            ext_cmd = json.loads(ext_cmd_raw)
+            self.assertEqual(ext_cmd["id"], 12)
+            self.assertEqual(ext_cmd["method"], "DOMSnapshot.captureSnapshot")
+            self.assertEqual(ext_cmd["sessionId"], "session-child-ashby-999")
+
+            # Extension returns snapshot result with child sessionId
+            await ext_ws.in_queue.put(json.dumps({
+                "id": 12,
+                "result": {"documents": [{"nodes": {"nodeName": ["INPUT"]}}]},
+                "sessionId": "session-child-ashby-999",
+            }))
+
+            # Browser-Use receives response with child sessionId preserved (not overwritten by virtual session)
+            bu_snap_resp_raw = await asyncio.wait_for(bu_ws.out_queue.get(), timeout=2.0)
+            bu_snap_resp = json.loads(bu_snap_resp_raw)
+            self.assertEqual(bu_snap_resp["id"], 12)
+            self.assertEqual(bu_snap_resp["sessionId"], "session-child-ashby-999")
+            self.assertIn("documents", bu_snap_resp["result"])
+
+            # 6. Target.targetInfoChanged updates target URL in bridge
+            await ext_ws.in_queue.put(json.dumps({
+                "method": "Target.targetInfoChanged",
+                "params": {
+                    "targetInfo": {
+                        "targetId": "target-child-ashby-999",
+                        "type": "iframe",
+                        "url": "https://jobs.ashbyhq.com/elevenlabs/test-job/application?navigated=true",
+                        "title": "Application Page Navigated",
+                    }
+                }
+            }))
+            fwd_info_raw = await asyncio.wait_for(bu_ws.out_queue.get(), timeout=2.0)
+            fwd_info = json.loads(fwd_info_raw)
+            self.assertEqual(fwd_info["method"], "Target.targetInfoChanged")
+            self.assertEqual(
+                cdp_bridge.child_targets["target-child-ashby-999"]["url"],
+                "https://jobs.ashbyhq.com/elevenlabs/test-job/application?navigated=true"
+            )
+
+            # 7. Target.detachedFromTarget cleans up child target and notifies Browser-Use
+            await ext_ws.in_queue.put(json.dumps({
+                "method": "Target.detachedFromTarget",
+                "params": {
+                    "targetId": "target-child-ashby-999"
+                }
+            }))
+            fwd_detach_raw = await asyncio.wait_for(bu_ws.out_queue.get(), timeout=2.0)
+            fwd_detach = json.loads(fwd_detach_raw)
+            self.assertEqual(fwd_detach["method"], "Target.detachedFromTarget")
+            self.assertNotIn("target-child-ashby-999", cdp_bridge.child_targets)
+
+            ext_task.cancel()
+            bu_task.cancel()
+            await asyncio.gather(ext_task, bu_task, return_exceptions=True)
 if __name__ == "__main__":
     unittest.main()

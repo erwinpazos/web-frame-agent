@@ -20,6 +20,8 @@ class CDPBridgeManager:
             "url": settings.frontend_url,
             "title": "Web-Frame Agent Workspace",
         }
+        self.child_targets: Dict[str, Dict[str, Any]] = {}
+        self.child_sessions: Dict[str, str] = {}
         self.virtual_session_id = settings.cdp_virtual_session_id
         self._lock = asyncio.Lock()
         self.in_flight_commands: Dict[int, float] = {}  # msg_id -> timestamp
@@ -48,6 +50,8 @@ class CDPBridgeManager:
                 return
             self.extension_ws = None
             logger.info("Chrome Extension CDP Bridge unregistered.")
+            self.child_targets.clear()
+            self.child_sessions.clear()
             # Immediately fail all pending in-flight commands so browser-use does not hang
             if self.browser_use_ws and self.in_flight_commands:
                 logger.warning(f"Extension disconnected with {len(self.in_flight_commands)} in-flight commands. Failing immediately.")
@@ -214,14 +218,47 @@ async def websocket_extension_endpoint(websocket: WebSocket):
                 elif evt_method == "Page.domContentEventFired":
                     logger.info(f"[Iframe Lifecycle] DOMContentLoaded event fired for current iframe")
 
+                if evt_method == "Target.attachedToTarget":
+                    params = data.get("params", {})
+                    s_id = params.get("sessionId")
+                    t_info = params.get("targetInfo", {})
+                    t_id = t_info.get("targetId")
+                    if s_id and t_id:
+                        cdp_bridge.child_sessions[s_id] = t_id
+                        cdp_bridge.child_targets[t_id] = t_info
+                        logger.info(f"[CDP Bridge] Registered child iframe target: {t_id} (session: {s_id}, url: {t_info.get('url', '')})")
+                    if cdp_bridge.browser_use_ws:
+                        await cdp_bridge.browser_use_ws.send_text(json.dumps(data))
+                    continue
+
+                if evt_method == "Target.targetInfoChanged":
+                    params = data.get("params", {})
+                    t_info = params.get("targetInfo", {})
+                    t_id = t_info.get("targetId")
+                    if t_id and t_id in cdp_bridge.child_targets:
+                        cdp_bridge.child_targets[t_id].update(t_info)
+                        logger.info(f"[CDP Bridge] Updated child iframe target: {t_id} (url: {t_info.get('url', '')})")
+                    if cdp_bridge.browser_use_ws:
+                        await cdp_bridge.browser_use_ws.send_text(json.dumps(data))
+                    continue
+
                 # Prevent browser-use from crashing when an iframe navigates/swaps targets
-                if data.get("method") == "Target.detachedFromTarget":
+                if evt_method == "Target.detachedFromTarget":
                     detached_params = data.get("params", {})
                     detached_target = detached_params.get("targetId")
+                    if detached_target and detached_target in cdp_bridge.child_targets:
+                        cdp_bridge.child_targets.pop(detached_target, None)
+                        cdp_bridge.child_sessions = {s: t for s, t in cdp_bridge.child_sessions.items() if t != detached_target}
+                        logger.info(f"[CDP Bridge] Child iframe target detached: {detached_target}")
+                        if cdp_bridge.browser_use_ws:
+                            await cdp_bridge.browser_use_ws.send_text(json.dumps(data))
+                        continue
                     if detached_target and detached_target == cdp_bridge.active_tab_info.get("targetId"):
                         logger.info(f"Active iframe target {detached_target} detached, clearing stale session.")
                         cdp_bridge.active_tab_info.pop("iframe_session_id", None)
                         cdp_bridge.active_tab_info["targetId"] = str(cdp_bridge.active_tab_info.get("tabId", 1))
+                        cdp_bridge.child_targets.clear()
+                        cdp_bridge.child_sessions.clear()
                     else:
                         logger.info(f"Target detached (non-active): {detached_target}")
                     continue
@@ -231,8 +268,11 @@ async def websocket_extension_endpoint(websocket: WebSocket):
                     resp_id = data.get("id")
                     if resp_id is not None and resp_id in cdp_bridge.in_flight_commands:
                         cdp_bridge.in_flight_commands.pop(resp_id, None)
-                    if data.get("sessionId"):
+                    evt_session = data.get("sessionId")
+                    live_root_session = cdp_bridge.active_tab_info.get("iframe_session_id")
+                    if evt_session and evt_session == live_root_session:
                         data["sessionId"] = cdp_bridge.virtual_session_id
+                    # For child sessions (evt_session != live_root_session), leave data["sessionId"] as the child's sessionId!
                     text = json.dumps(data)
                     await cdp_bridge.browser_use_ws.send_text(text)
             except Exception as e:
@@ -306,40 +346,82 @@ async def websocket_browser_use_endpoint(websocket: WebSocket, target_id: Option
                     continue
 
                 elif method == "Target.setAutoAttach":
+                    if cdp_bridge.extension_ws:
+                        fwd_cmd = dict(data)
+                        live_root_session = cdp_bridge.active_tab_info.get("iframe_session_id")
+                        req_session = data.get("sessionId")
+                        if req_session == cdp_bridge.virtual_session_id or not req_session:
+                            if live_root_session:
+                                fwd_cmd["sessionId"] = live_root_session
+                            else:
+                                fwd_cmd.pop("sessionId", None)
+                        else:
+                            fwd_cmd["sessionId"] = req_session
+                        await cdp_bridge.extension_ws.send_text(json.dumps(fwd_cmd))
                     await websocket.send_text(json.dumps({"id": msg_id, "result": {}}))
                     continue
 
                 elif method == "Target.getTargets":
+                    targets_list = [target_info]
+                    for c_info in cdp_bridge.child_targets.values():
+                        targets_list.append(c_info)
                     await websocket.send_text(json.dumps({
                         "id": msg_id,
                         "result": {
-                            "targetInfos": [target_info]
+                            "targetInfos": targets_list
                         }
                     }))
                     continue
 
                 elif method == "Target.attachToTarget":
                     chosen_target_id = str(params.get("targetId", target_id_str))
-                    assigned_session_id = cdp_bridge.virtual_session_id
-                    # 1. Send the command response
-                    await websocket.send_text(json.dumps({
-                        "id": msg_id,
-                        "result": {
-                            "sessionId": assigned_session_id
+                    if chosen_target_id in cdp_bridge.child_targets:
+                        child_sess = None
+                        for s_id, t_id in cdp_bridge.child_sessions.items():
+                            if t_id == chosen_target_id:
+                                child_sess = s_id
+                                break
+                        if not child_sess:
+                            child_sess = f"session-child-{chosen_target_id}"
+                        assigned_session_id = child_sess
+                        c_target_info = cdp_bridge.child_targets[chosen_target_id]
+                        await websocket.send_text(json.dumps({
+                            "id": msg_id,
+                            "result": {
+                                "sessionId": assigned_session_id
+                            }
+                        }))
+                        attach_event = {
+                            "method": "Target.attachedToTarget",
+                            "params": {
+                                "sessionId": assigned_session_id,
+                                "targetInfo": c_target_info,
+                                "waitingForDebugger": False,
+                            }
                         }
-                    }))
+                        await websocket.send_text(json.dumps(attach_event))
+                        continue
+                    else:
+                        assigned_session_id = cdp_bridge.virtual_session_id
+                        # 1. Send the command response
+                        await websocket.send_text(json.dumps({
+                            "id": msg_id,
+                            "result": {
+                                "sessionId": assigned_session_id
+                            }
+                        }))
 
-                    # 2. Immediately dispatch Target.attachedToTarget event required by SessionManager
-                    attach_event = {
-                        "method": "Target.attachedToTarget",
-                        "params": {
-                            "sessionId": assigned_session_id,
-                            "targetInfo": target_info,
-                            "waitingForDebugger": False,
+                        # 2. Immediately dispatch Target.attachedToTarget event required by SessionManager
+                        attach_event = {
+                            "method": "Target.attachedToTarget",
+                            "params": {
+                                "sessionId": assigned_session_id,
+                                "targetInfo": target_info,
+                                "waitingForDebugger": False,
+                            }
                         }
-                    }
-                    await websocket.send_text(json.dumps(attach_event))
-                    continue
+                        await websocket.send_text(json.dumps(attach_event))
+                        continue
 
                 elif method in ("Target.detachFromTarget", "Target.activateTarget", "Target.closeTarget"):
                     await websocket.send_text(json.dumps({"id": msg_id, "result": {}}))
@@ -434,21 +516,30 @@ async def websocket_browser_use_endpoint(websocket: WebSocket, target_id: Option
                 elif method in ("Page.enable", "Network.enable", "Page.setLifecycleEventsEnabled"):
                     if cdp_bridge.extension_ws:
                         live_session = cdp_bridge.active_tab_info.get("iframe_session_id")
+                        req_session = data.get("sessionId")
                         fwd_data = dict(data)
-                        if live_session:
-                            fwd_data["sessionId"] = live_session
+                        if req_session == cdp_bridge.virtual_session_id or not req_session:
+                            if live_session:
+                                fwd_data["sessionId"] = live_session
+                            else:
+                                fwd_data.pop("sessionId", None)
                         else:
-                            fwd_data.pop("sessionId", None)
+                            fwd_data["sessionId"] = req_session
                         await cdp_bridge.extension_ws.send_text(json.dumps(fwd_data))
                     await websocket.send_text(json.dumps({"id": msg_id, "result": {}}))
                     continue
                 # --- 3. Forward All Page-Level Operations (Page, DOM, Accessibility, Input) to Extension ---
                 if cdp_bridge.extension_ws:
                     live_session = cdp_bridge.active_tab_info.get("iframe_session_id")
-                    if live_session:
-                        data["sessionId"] = live_session
+                    req_session = data.get("sessionId")
+                    if req_session == cdp_bridge.virtual_session_id or not req_session:
+                        if live_session:
+                            data["sessionId"] = live_session
+                        else:
+                            data.pop("sessionId", None)
                     else:
-                        data.pop("sessionId", None)
+                        # Child session (OOPiF): preserve the specific child sessionId!
+                        data["sessionId"] = req_session
                     if msg_id is not None:
                         import time
                         cdp_bridge.in_flight_commands[msg_id] = time.time()
