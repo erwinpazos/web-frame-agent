@@ -19,6 +19,7 @@ let discoveryInterval = null;
 let attachedHostTab = false;
 let iframeSessionId = null;
 let iframeTargetInfo = null;
+const childIframeSessions = new Map();
 let reconnectTimer = null;
 console.log('[CDP Bridge] Background service worker initialized with Flat Sessions support.');
 
@@ -622,7 +623,7 @@ async function handleBackendMessage(message) {
   }
 
   // Construct debuggee: in Chromium Flat Sessions, route to the attached child iframe session!
-  const targetSession = iframeSessionId || sessionId;
+  const targetSession = sessionId || iframeSessionId;
   const numericTabId = Number(hostTabId);
   const debuggee = targetSession
     ? { tabId: numericTabId, sessionId: targetSession }
@@ -633,11 +634,11 @@ async function handleBackendMessage(message) {
   try {
     chrome.debugger.sendCommand(debuggee, method, sanitizedParams, (result) => {
       let err = chrome.runtime.lastError;
-      sendResponse(msgId, sessionId, err, result);
+      sendResponse(msgId, targetSession, err, result);
     });
   } catch (cmdErr) {
     console.warn(`[CDP Bridge] sendCommand threw for ${method}:`, cmdErr);
-    sendResponse(msgId, sessionId, { message: cmdErr.message }, null);
+    sendResponse(msgId, targetSession, { message: cmdErr.message }, null);
   }
 }
 function sendResponse(msgId, sessionId, err, result, meta) {
@@ -843,9 +844,6 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       (targetInfo.url && (targetInfo.url.endsWith('.js') || targetInfo.url.includes('/sw.js') || targetInfo.url.includes('worker.js')))
     );
 
-    // When Chrome attaches the child iframe, accept the real sessionId directly!
-    // Protect existing root workspace iframe session. Do NOT let nested sub-iframes
-    // (e.g. ogs.google.com, ad widgets, about:blank trackers) overwrite an already attached workspace target session.
     const isCandidate = !isHostTab && !isWorker && (
       targetInfo.type === 'iframe' ||
       targetInfo.type === 'other' ||
@@ -853,40 +851,96 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     ) && (targetInfo.url ? !isHostWorkspaceUrl(targetInfo.url) : true);
 
     if (isCandidate) {
-      const isSubFrameOfExisting = iframeSessionId && (
-        targetInfo.type === 'iframe' || targetInfo.type === 'other'
-      ) && (
-        !targetInfo.url ||
-        targetInfo.url === 'about:blank' ||
-        targetInfo.url.startsWith('about:') ||
-        targetInfo.url.includes('ogs.google.com') ||
-        targetInfo.url.includes('widget') ||
-        targetInfo.url.startsWith('chrome-extension://')
-      );
-      if (isSubFrameOfExisting) {
-        console.log('[CDP Bridge] Ignoring child sub-iframe attachment to keep root target session:', targetInfo);
-      } else {
+      if (!iframeSessionId) {
+        // Root workspace iframe session
         iframeSessionId = sessionId;
         iframeTargetInfo = targetInfo;
-        console.log('[CDP Bridge] Successfully bound to workspace iframe session:', iframeSessionId, iframeTargetInfo);
+        console.log('[CDP Bridge] Successfully bound to root workspace iframe session:', iframeSessionId, iframeTargetInfo);
         notifyBackendIframeInfo();
 
-        // Enable Network and Page on the child iframe session to ensure cookies and security policies are active
+        // Enable Network and Page on the root iframe session to ensure cookies and security policies are active
         try {
           chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId: iframeSessionId }, 'Network.enable', {}, () => {});
           chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId: iframeSessionId }, 'Page.enable', {}, () => {});
         } catch (e) {}
+      } else if (sessionId !== iframeSessionId) {
+        // Child sub-iframe session (e.g. Ashby, Greenhouse, Lever, hCaptcha, Turnstile)
+        console.log('[CDP Bridge] Registering child sub-iframe session:', sessionId, targetInfo);
+        childIframeSessions.set(sessionId, targetInfo);
+
+        try {
+          chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId }, 'Network.enable', {}, () => {});
+          chrome.debugger.sendCommand({ tabId: Number(hostTabId), sessionId }, 'Page.enable', {}, () => {});
+        } catch (e) {}
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            method: 'Target.attachedToTarget',
+            params: {
+              sessionId: sessionId,
+              targetInfo: targetInfo,
+              waitingForDebugger: false
+            },
+            sessionId: sessionId,
+            tabId: source.tabId
+          }));
+        }
       }
     }
+    return;
   }
+
+  // 1b. Track target info updates (e.g. child iframe navigating from about:blank to real URL)
+  if (method === 'Target.targetInfoChanged') {
+    const { targetInfo } = params || {};
+    if (targetInfo) {
+      if (iframeTargetInfo && iframeTargetInfo.targetId === targetInfo.targetId) {
+        iframeTargetInfo = { ...iframeTargetInfo, ...targetInfo };
+      }
+      for (const [sId, tInfo] of childIframeSessions.entries()) {
+        if (tInfo && tInfo.targetId === targetInfo.targetId) {
+          childIframeSessions.set(sId, { ...tInfo, ...targetInfo });
+          break;
+        }
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          method: 'Target.targetInfoChanged',
+          params: params,
+          sessionId: source.sessionId || iframeSessionId,
+          tabId: source.tabId
+        }));
+      }
+    }
+    return;
+  }
+
   if (method === 'Target.detachedFromTarget') {
-    const { targetId } = params;
+    const { targetId } = params || {};
     if (iframeTargetInfo && targetId === iframeTargetInfo.targetId) {
-      console.log('[CDP Bridge] Active iframe detached:', targetId);
+      console.log('[CDP Bridge] Active root iframe detached:', targetId);
       iframeSessionId = null;
       iframeTargetInfo = null;
+      childIframeSessions.clear();
       startContinuousIframeDiscovery();
+    } else if (targetId) {
+      for (const [sId, tInfo] of childIframeSessions.entries()) {
+        if (tInfo && tInfo.targetId === targetId) {
+          console.log('[CDP Bridge] Child sub-iframe detached:', targetId, sId);
+          childIframeSessions.delete(sId);
+          break;
+        }
+      }
     }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        method: 'Target.detachedFromTarget',
+        params: params,
+        sessionId: source.sessionId || iframeSessionId,
+        tabId: source.tabId
+      }));
+    }
+    return;
   }
 
   // 2. Intercept raw HTTP response headers to auto-upgrade Set-Cookie headers for cross-site iframe persistence
@@ -982,6 +1036,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     hostTabId = null;
     iframeSessionId = null;
     iframeTargetInfo = null;
+    childIframeSessions.clear();
   }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
