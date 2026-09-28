@@ -84,8 +84,7 @@ export function App() {
     clearChat,
   } = useAgentChat({ onUrlChanged: handleAgentUrlChanged, onIframeStatus: setIsIframeReady, authToken })
 
-  // Periodically check backend health
-  // Bootstrap ephemeral session token and check backend health
+  // Bootstrap ephemeral session token once on mount
   useEffect(() => {
     const bootstrapSession = async () => {
       try {
@@ -106,7 +105,10 @@ export function App() {
     }
 
     bootstrapSession()
+  }, [])
 
+  // Periodically check backend health
+  useEffect(() => {
     const checkHealth = async () => {
       try {
         const res = await fetch('/health')

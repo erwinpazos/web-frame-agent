@@ -1051,9 +1051,19 @@ chrome.tabs.onActivated.addListener(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket();
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && (!ws || ws.readyState !== WebSocket.OPEN)) {
     connectWebSocket();
+  }
+
+  // If the host workspace tab finished loading and has no active attached session, bind it
+  if (changeInfo.status === 'complete') {
+    const isHost = (hostTabId && tabId === hostTabId) || (tab && tab.url && isHostWorkspaceUrl(tab.url));
+    if (isHost && (!iframeSessionId || !attachedHostTab)) {
+      hostTabId = tabId;
+      if (tab && tab.windowId) hostWindowId = tab.windowId;
+      await initializeHostAndIframeSession();
+    }
   }
 });
 
