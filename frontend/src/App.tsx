@@ -67,10 +67,10 @@ export function App() {
       currentUrlRef.current = newUrl
       setCurrentUrl(newUrl)
       setInputUrl(newUrl)
-      if (iframeRef.current) {
-        setIsLoadingIframe(true)
-        iframeRef.current.src = newUrl
-      }
+      // Note: Do NOT reassign iframeRef.current.src here.
+      // The iframe has already navigated internally or rendered in place.
+      // Re-assigning src triggers an iframe hard reload, destroying in-progress form data,
+      // React/DOM memory state, and file inputs (such as uploaded CVs).
     }
   }
 
