@@ -373,6 +373,19 @@
               }
             }
 
+            // If user has a valid refresh_token in storage but Nuxt auth shows loggedIn === false on normal pages
+            if (!window.location.search.includes('code=') && !window.location.search.includes('state=')) {
+              const auth = window.$nuxt && window.$nuxt.$auth;
+              if (auth && !auth.loggedIn) {
+                const refreshToken = window.localStorage.getItem('auth._refresh_token.azureB2C') ||
+                                    (auth.$storage && auth.$storage.getUniversal('azureB2C.refresh_token'));
+                if (refreshToken && auth.strategy && auth.strategy.refreshToken) {
+                  auth.strategy.refreshToken().then(() => {
+                    if (auth.fetchUser) auth.fetchUser();
+                  }).catch(() => {});
+                }
+              }
+            }
             // If stuck on an expired ?state=...&code=... callback URL for > 3.5s
             if (window.location.search.includes('state=') && window.location.search.includes('code=')) {
               const auth = window.$nuxt && window.$nuxt.$auth;

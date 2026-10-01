@@ -551,7 +551,11 @@ async function handleBackendMessage(message) {
     return;
   }
 
-  // Ignore messages that are not valid CDP commands
+  if (message.type === 'reload_extension') {
+    console.log('[CDP Bridge] Received reload_extension command from backend. Reloading...');
+    chrome.runtime.reload();
+    return;
+  }
   if (!message.method) {
     console.log('[CDP Bridge] Received non-CDP message from backend, ignoring:', message);
     return;
