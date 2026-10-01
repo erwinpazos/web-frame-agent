@@ -389,6 +389,55 @@
           } catch (e) {}
         };
 
+        // C. Intercept Nuxt instance initialization to neutralize automatic redirects away from job offers
+        try {
+          let nuxtApp = window.$nuxt || null;
+          const patchNuxtApp = (app) => {
+            if (!app) return;
+            try {
+              if (app.$auth) {
+                if (app.$auth.options) {
+                  app.$auth.options.watchLoggedIn = false;
+                  if (app.$auth.options.redirect) {
+                    app.$auth.options.redirect.home = false;
+                    app.$auth.options.redirect.login = false;
+                  }
+                }
+                const origRedirect = app.$auth.redirect;
+                app.$auth.redirect = function(name) {
+                  if (name === 'home' || name === 'login') {
+                    console.log('[CDP Bridge] Neutralized Nuxt Auth automatic redirect to:', name);
+                    return;
+                  }
+                  return origRedirect ? origRedirect.apply(this, arguments) : undefined;
+                };
+              }
+              if (app.$router) {
+                const origReplace = app.$router.replace;
+                app.$router.replace = function(loc) {
+                  if ((loc === '/' || (loc && loc.path === '/')) && window.location.pathname.startsWith('/offres/')) {
+                    console.log('[CDP Bridge] Blocked VueRouter.replace to / from offer page');
+                    return Promise.resolve();
+                  }
+                  return origReplace.apply(this, arguments);
+                };
+              }
+            } catch (e) {}
+          };
+
+          if (window.$nuxt) patchNuxtApp(window.$nuxt);
+
+          Object.defineProperty(window, '$nuxt', {
+            configurable: true,
+            enumerable: true,
+            get: function() { return nuxtApp; },
+            set: function(val) {
+              nuxtApp = val;
+              patchNuxtApp(val);
+            }
+          });
+        } catch (e) {}
+
         if (document.readyState === 'loading') {
           document.addEventListener('DOMContentLoaded', () => {
             recoverStuckSpa();
@@ -439,19 +488,26 @@
     };
 
     const origPushState = history.pushState;
-    history.pushState = function() {
+    history.pushState = function(state, title, url) {
+      if (url && (url === '/' || url === window.location.origin + '/') && window.location.pathname.startsWith('/offres/')) {
+        console.log('[CDP Bridge] Blocked unwanted history.pushState to root / from offer page');
+        return;
+      }
       const res = origPushState.apply(this, arguments);
       notifyParentOfNavigation();
       return res;
     };
 
     const origReplaceState = history.replaceState;
-    history.replaceState = function() {
+    history.replaceState = function(state, title, url) {
+      if (url && (url === '/' || url === window.location.origin + '/') && window.location.pathname.startsWith('/offres/')) {
+        console.log('[CDP Bridge] Blocked unwanted history.replaceState to root / from offer page');
+        return;
+      }
       const res = origReplaceState.apply(this, arguments);
       notifyParentOfNavigation();
       return res;
     };
-
     window.addEventListener('popstate', notifyParentOfNavigation);
     window.addEventListener('hashchange', notifyParentOfNavigation);
     window.addEventListener('DOMContentLoaded', notifyParentOfNavigation);
