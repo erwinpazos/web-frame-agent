@@ -275,26 +275,10 @@ async def websocket_extension_endpoint(websocket: WebSocket):
                                 if promoted:
                                     break
                         if not promoted:
-                            logger.info(f"Active iframe target {detached_target} detached, awaiting new target attachment.")
+                            logger.info(f"Active iframe target {detached_target} detached, awaiting new target attachment without dropping live session.")
                             cdp_bridge.active_tab_info["targetId"] = str(cdp_bridge.active_tab_info.get("tabId", 1))
                             cdp_bridge.child_targets.clear()
                             cdp_bridge.child_sessions.clear()
-                            # Grace period before dropping iframe_session_id to prevent ATTACH_WAIT flash during cross-site process swaps
-                            async def delayed_stale_clear(expected_session: str):
-                                await asyncio.sleep(2.5)
-                                if cdp_bridge.active_tab_info.get("iframe_session_id") == expected_session:
-                                    if cdp_bridge.active_tab_info.get("targetId") == str(cdp_bridge.active_tab_info.get("tabId", 1)):
-                                        logger.info("Grace period expired without replacement target. Dropping stale iframe session.")
-                                        cdp_bridge.active_tab_info.pop("iframe_session_id", None)
-                                        from app.services.agent_service import agent_service
-                                        await agent_service.broadcast({
-                                            "type": "iframe_status",
-                                            "iframe_ready": False,
-                                            "url": cdp_bridge.active_tab_info.get("url"),
-                                        })
-                            cur_sess = cdp_bridge.active_tab_info.get("iframe_session_id")
-                            if cur_sess:
-                                asyncio.create_task(delayed_stale_clear(cur_sess))
                     else:
                         logger.info(f"Target detached (non-active): {detached_target}")
                     continue

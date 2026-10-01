@@ -25,6 +25,14 @@ export function App() {
   const [backendStatus, setBackendStatus] = useState<'connected' | 'offline' | 'checking'>('checking')
   const [extensionConnected, setExtensionConnected] = useState<boolean>(false)
   const [isIframeReady, setIsIframeReady] = useState<boolean>(false)
+  const [hasAttachedOnce, setHasAttachedOnce] = useState<boolean>(false)
+
+  const handleIframeStatus = (ready: boolean) => {
+    setIsIframeReady(ready)
+    if (ready) {
+      setHasAttachedOnce(true)
+    }
+  }
   const [panelWidth, setPanelWidth] = useState<number>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('cobrowse_panel_width')
@@ -82,7 +90,7 @@ export function App() {
     sendMessage,
     stopAgent,
     clearChat,
-  } = useAgentChat({ onUrlChanged: handleAgentUrlChanged, onIframeStatus: setIsIframeReady, authToken })
+  } = useAgentChat({ onUrlChanged: handleAgentUrlChanged, onIframeStatus: handleIframeStatus, authToken })
 
   // Bootstrap ephemeral session token once on mount
   useEffect(() => {
@@ -116,7 +124,11 @@ export function App() {
           const data = await res.json()
           setBackendStatus('connected')
           setExtensionConnected(data.extension_connected || false)
-          setIsIframeReady(Boolean(data.iframe_ready))
+          const isReady = Boolean(data.iframe_ready)
+          setIsIframeReady(isReady)
+          if (isReady) {
+            setHasAttachedOnce(true)
+          }
           const activeModel = data.llm_model || data.vertex_model
           if (activeModel) {
             setModelName(activeModel)
@@ -338,7 +350,7 @@ export function App() {
           <Chatbot
             messages={messages}
             isBusy={isBusy}
-            isReady={isIframeReady}
+            isReady={hasAttachedOnce || isIframeReady}
             modelName={modelName}
             onSendMessage={(prompt, attachments) => sendMessage(prompt, currentUrl, attachments)}
             onStopAgent={stopAgent}
@@ -386,8 +398,8 @@ export function App() {
 
           {/* Iframe Container */}
           <div className="flex-1 relative w-full h-full bg-[#090a0f]">
-            {/* Attachment Veil: shown until Chrome extension binds to target iframe OOPIF session */}
-            {!isIframeReady && (
+            {/* Attachment Veil: ONLY shown at initial startup until the extension binds for the first time */}
+            {!hasAttachedOnce && !isIframeReady && (
               <div className="absolute inset-0 bg-[#090a0f]/85 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center z-20 select-none">
                 <div className="max-w-md p-6 bg-[#10121a] border border-[#1e2230] flex flex-col items-center gap-3.5 shadow-2xl">
                   <div className="relative flex items-center justify-center">
