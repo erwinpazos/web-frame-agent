@@ -310,6 +310,188 @@
         }
       } catch (e) {}
     },
+
+    // 7. Universal OAuth PKCE & SPA redirect guard for cross-origin iframes
+    'preserve-oauth-pkce': function() {
+      try {
+        const KNOWN_VERIFIER_ALIASES = [
+          'auth.undefined.code_verifier',
+          'auth.azureB2C.code_verifier',
+          'azureB2C.code_verifier',
+          'undefined.code_verifier',
+          '_cobrowse_pkce_verifier',
+        ];
+
+        const KNOWN_REDIRECT_ALIASES = [
+          'auth.redirect',
+          'redirect',
+          'auth.azureB2C.redirect',
+          'azureB2C.redirect',
+          '_cobrowse_oauth_redirect',
+        ];
+
+        // A. Hook Storage.prototype to mirror PKCE verifiers & redirect targets across both localStorage & sessionStorage
+        const origStorageSetItem = Storage.prototype.setItem;
+        const origStorageGetItem = Storage.prototype.getItem;
+
+        Storage.prototype.setItem = function(key, val) {
+          try {
+            if (typeof key === 'string' && key.includes('code_verifier') && val && val !== 'undefined' && val !== 'null') {
+              for (const alias of KNOWN_VERIFIER_ALIASES) {
+                if (alias !== key) {
+                  try { origStorageSetItem.call(window.localStorage, alias, val); } catch (e) {}
+                  try { origStorageSetItem.call(window.sessionStorage, alias, val); } catch (e) {}
+                }
+              }
+            } else if (typeof key === 'string' && key.includes('redirect') && val && typeof val === 'string' && val !== 'null' && val !== 'undefined' && val !== '/') {
+              for (const alias of KNOWN_REDIRECT_ALIASES) {
+                if (alias !== key) {
+                  try { origStorageSetItem.call(window.localStorage, alias, val); } catch (e) {}
+                  try { origStorageSetItem.call(window.sessionStorage, alias, val); } catch (e) {}
+                }
+              }
+            }
+          } catch (e) {}
+          return origStorageSetItem.apply(this, arguments);
+        };
+
+        Storage.prototype.getItem = function(key) {
+          const res = origStorageGetItem.apply(this, arguments);
+          if ((!res || res === 'undefined' || res === 'null') && typeof key === 'string') {
+            if (key.includes('code_verifier')) {
+              for (const alias of KNOWN_VERIFIER_ALIASES) {
+                try {
+                  const val = origStorageGetItem.call(window.localStorage, alias) || origStorageGetItem.call(window.sessionStorage, alias);
+                  if (val && val !== 'undefined' && val !== 'null') return val;
+                } catch (e) {}
+              }
+            } else if (key.includes('redirect')) {
+              for (const alias of KNOWN_REDIRECT_ALIASES) {
+                try {
+                  const val = origStorageGetItem.call(window.sessionStorage, alias) || origStorageGetItem.call(window.localStorage, alias);
+                  if (val && val !== 'undefined' && val !== 'null' && val !== '/') return val;
+                } catch (e) {}
+              }
+            }
+          }
+          return res;
+        };
+        // B. Automatic SPA cleanup: clean ?method=null and unfreeze stuck Nuxt loading spinners
+        const recoverStuckSpa = () => {
+          try {
+            const search = window.location.search || '';
+            if (search.includes('method=null')) {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('method');
+              const cleanSearch = url.searchParams.toString();
+              const newUrl = url.pathname + (cleanSearch ? '?' + cleanSearch : '') + url.hash;
+              window.history.replaceState({}, '', newUrl);
+            }
+
+            // If layout component is stuck on loading=true after initial page load
+            const flexCenter = document.querySelector('.flex_center');
+            if (flexCenter && flexCenter.__vue__ && flexCenter.__vue__.loading === true) {
+              if (!window.location.search.includes('code=') && !window.location.search.includes('state=')) {
+                flexCenter.__vue__.loading = false;
+              }
+            }
+
+            // If user has a valid refresh_token in storage but Nuxt auth shows loggedIn === false on normal pages
+            if (!window.location.search.includes('code=') && !window.location.search.includes('state=')) {
+              const auth = window.$nuxt && window.$nuxt.$auth;
+              if (auth && !auth.loggedIn) {
+                const refreshToken = window.localStorage.getItem('auth._refresh_token.azureB2C') ||
+                                    (auth.$storage && auth.$storage.getUniversal('azureB2C.refresh_token'));
+                if (refreshToken && auth.strategy && auth.strategy.refreshToken) {
+                  auth.strategy.refreshToken().then(() => {
+                    if (auth.fetchUser) auth.fetchUser();
+                  }).catch(() => {});
+                }
+              }
+            }
+          } catch (e) {}
+        };
+
+        // C. Intercept Nuxt instance initialization to neutralize automatic redirects away from job offers
+        try {
+          let nuxtApp = window.$nuxt || null;
+          const patchNuxtApp = (app) => {
+            if (!app) return;
+            try {
+              if (app.$auth) {
+                if (app.$auth.options) {
+                  app.$auth.options.watchLoggedIn = false;
+                  if (app.$auth.options.redirect) {
+                    app.$auth.options.redirect.home = false;
+                    app.$auth.options.redirect.login = false;
+                  }
+                }
+                const origRedirect = app.$auth.redirect;
+                app.$auth.redirect = function(name) {
+                  if (name === 'home' || name === 'login') {
+                    console.log('[CDP Bridge] Neutralized Nuxt Auth automatic redirect to:', name);
+                    return;
+                  }
+                  return origRedirect ? origRedirect.apply(this, arguments) : undefined;
+                };
+              }
+              if (app.$router) {
+                const origReplace = app.$router.replace;
+                app.$router.replace = function(loc) {
+                  // If router attempts to replace with '/', check if a preserved return destination exists
+                  if (loc === '/' || (loc && loc.path === '/')) {
+                    const savedTarget = window.sessionStorage.getItem('_cobrowse_oauth_redirect') ||
+                                        window.localStorage.getItem('_cobrowse_oauth_redirect');
+                    if (savedTarget && savedTarget !== '/' && typeof savedTarget === 'string') {
+                      console.log('[CDP Bridge] VueRouter.replace to / intercepted, following preserved target:', savedTarget);
+                      return origReplace.call(this, savedTarget);
+                    }
+                    if (window.location.pathname !== '/') {
+                      console.log('[CDP Bridge] VueRouter.replace to / blocked to maintain current page context');
+                      return Promise.resolve();
+                    }
+                  }
+                  return origReplace.apply(this, arguments);
+                };
+              }
+            } catch (e) {}
+          };
+
+          if (window.$nuxt) patchNuxtApp(window.$nuxt);
+
+          Object.defineProperty(window, '$nuxt', {
+            configurable: true,
+            enumerable: true,
+            get: function() { return nuxtApp; },
+            set: function(val) {
+              nuxtApp = val;
+              patchNuxtApp(val);
+            }
+          });
+        } catch (e) {}
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', () => {
+            recoverStuckSpa();
+            setTimeout(recoverStuckSpa, 400);
+            setTimeout(recoverStuckSpa, 1200);
+            setTimeout(recoverStuckSpa, 2500);
+            setTimeout(recoverStuckSpa, 4000);
+          });
+        } else {
+          recoverStuckSpa();
+          setTimeout(recoverStuckSpa, 400);
+          setTimeout(recoverStuckSpa, 1200);
+          setTimeout(recoverStuckSpa, 2500);
+          setTimeout(recoverStuckSpa, 4000);
+        }
+        window.addEventListener('load', () => {
+          recoverStuckSpa();
+          setTimeout(recoverStuckSpa, 800);
+          setTimeout(recoverStuckSpa, 3500);
+        });
+      } catch (e) {}
+    },
   };
 
   // Default baseline patches applied everywhere safely
@@ -319,7 +501,7 @@
   PATCHES['contain-window-open']();
   PATCHES['strip-meta-csp']();
   PATCHES['request-storage-access']();
-
+  PATCHES['preserve-oauth-pkce']();
   // Hook History API in MAIN world to capture SPA navigations (pushState / replaceState)
   try {
     const notifyParentOfNavigation = () => {
@@ -350,7 +532,6 @@
       notifyParentOfNavigation();
       return res;
     };
-
     window.addEventListener('popstate', notifyParentOfNavigation);
     window.addEventListener('hashchange', notifyParentOfNavigation);
     window.addEventListener('DOMContentLoaded', notifyParentOfNavigation);

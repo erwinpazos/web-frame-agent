@@ -254,11 +254,31 @@ async def websocket_extension_endpoint(websocket: WebSocket):
                             await cdp_bridge.browser_use_ws.send_text(json.dumps(data))
                         continue
                     if detached_target and detached_target == cdp_bridge.active_tab_info.get("targetId"):
-                        logger.info(f"Active iframe target {detached_target} detached, clearing stale session.")
-                        cdp_bridge.active_tab_info.pop("iframe_session_id", None)
-                        cdp_bridge.active_tab_info["targetId"] = str(cdp_bridge.active_tab_info.get("tabId", 1))
-                        cdp_bridge.child_targets.clear()
-                        cdp_bridge.child_sessions.clear()
+                        # If Chrome attached a newer OOPiF target before detaching the previous one, promote the surviving child target
+                        promoted = False
+                        for c_id, c_info in list(cdp_bridge.child_targets.items()):
+                            # Accept any valid child target that is not an extension (even during handshake with empty URL)
+                            if not c_url.startswith("chrome-extension://") and not c_url.startswith("moz-extension://"):
+                                for s_id, t_id in list(cdp_bridge.child_sessions.items()):
+                                    if t_id == c_id:
+                                        logger.info(f"[CDP Bridge] Promoting surviving child target {c_id} ({c_url or 'pending'}) to active root iframe session {s_id}")
+                                        cdp_bridge.active_tab_info["targetId"] = c_id
+                                        cdp_bridge.active_tab_info["iframe_session_id"] = s_id
+                                        if c_url:
+                                            cdp_bridge.active_tab_info["url"] = c_url
+                                        if c_info.get("title"):
+                                            cdp_bridge.active_tab_info["title"] = c_info.get("title", "")
+                                        cdp_bridge.child_targets.pop(c_id, None)
+                                        cdp_bridge.child_sessions.pop(s_id, None)
+                                        promoted = True
+                                        break
+                                if promoted:
+                                    break
+                        if not promoted:
+                            logger.info(f"Active iframe target {detached_target} detached, awaiting new target attachment without dropping live session.")
+                            cdp_bridge.active_tab_info["targetId"] = str(cdp_bridge.active_tab_info.get("tabId", 1))
+                            cdp_bridge.child_targets.clear()
+                            cdp_bridge.child_sessions.clear()
                     else:
                         logger.info(f"Target detached (non-active): {detached_target}")
                     continue

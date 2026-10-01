@@ -465,15 +465,15 @@ function startContinuousIframeDiscovery() {
         // Exclude external standalone tabs
         if (t.tabId && t.tabId !== hostTabId) return false;
         // Exclude internal extensions and UI
-        if (t.url && (isHostWorkspaceUrl(t.url) || t.url.startsWith('chrome-extension://'))) return false;
-
-        // An iframe target MUST have either an HTTP url OR a title containing an HTTP URL
-        const hasHttp = (t.url && t.url.startsWith('http')) || (t.title && t.title.startsWith('http'));
-        if (!hasHttp) return false;
+        if (t.url && (isHostWorkspaceUrl(t.url) || t.url.startsWith('chrome-extension://') || t.url.startsWith('moz-extension://'))) return false;
+        if (t.title && (t.title.includes('chrome-extension://') || t.title.toLowerCase().includes('extension'))) return false;
+        // An iframe target can have an HTTP URL or can be during transition (empty/about:blank)
+        const isExt = (t.url && (t.url.startsWith('chrome-extension://') || t.url.startsWith('moz-extension://'))) ||
+                      (t.title && (t.title.includes('chrome-extension://') || t.title.toLowerCase().includes('extension')));
+        if (isExt) return false;
 
         return t.type === 'iframe' || t.type === 'other' || t.type === 'page';
       });
-
       if (targetIframe && !iframeSessionId) {
         console.log('[CDP Bridge] Candidate target detected for the iframe, requesting attachment via Target.attachToTarget:', targetIframe);
         // Request flat session attachment directly through host debugger
@@ -496,6 +496,14 @@ function startContinuousIframeDiscovery() {
               clearInterval(discoveryInterval);
               discoveryInterval = null;
             }
+          } else {
+            // Target might already be attached via Target.setAutoAttach; re-trigger to flush events
+            console.warn('[CDP Bridge] Target.attachToTarget notice:', err ? err.message : res);
+            chrome.debugger.sendCommand({ tabId: Number(hostTabId) }, 'Target.setAutoAttach', {
+              autoAttach: true,
+              waitForDebuggerOnStart: false,
+              flatten: true
+            }, () => {});
           }
         });
       }
@@ -543,7 +551,11 @@ async function handleBackendMessage(message) {
     return;
   }
 
-  // Ignore messages that are not valid CDP commands
+  if (message.type === 'reload_extension') {
+    console.log('[CDP Bridge] Received reload_extension command from backend. Reloading...');
+    chrome.runtime.reload();
+    return;
+  }
   if (!message.method) {
     console.log('[CDP Bridge] Received non-CDP message from backend, ignoring:', message);
     return;
@@ -844,11 +856,17 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       (targetInfo.url && (targetInfo.url.endsWith('.js') || targetInfo.url.includes('/sw.js') || targetInfo.url.includes('worker.js')))
     );
 
-    const isCandidate = !isHostTab && !isWorker && (
+    // Filter out third-party extensions (Bitwarden, 1Password, LastPass, etc.)
+    const isExtension = targetInfo && (
+      (targetInfo.url && (targetInfo.url.startsWith('chrome-extension://') || targetInfo.url.startsWith('moz-extension://'))) ||
+      (targetInfo.type === 'other' && targetInfo.title && targetInfo.title.toLowerCase().includes('extension'))
+    );
+
+    const isCandidate = !isHostTab && !isWorker && !isExtension && (
       targetInfo.type === 'iframe' ||
       targetInfo.type === 'other' ||
       targetInfo.type === 'page'
-    ) && (targetInfo.url ? !isHostWorkspaceUrl(targetInfo.url) : true);
+    ) && (targetInfo.url ? (!isHostWorkspaceUrl(targetInfo.url) && !targetInfo.url.startsWith('chrome-extension://')) : true);
 
     if (isCandidate) {
       if (!iframeSessionId) {
@@ -919,10 +937,41 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     const { targetId } = params || {};
     if (iframeTargetInfo && targetId === iframeTargetInfo.targetId) {
       console.log('[CDP Bridge] Active root iframe detached:', targetId);
-      iframeSessionId = null;
-      iframeTargetInfo = null;
-      childIframeSessions.clear();
-      startContinuousIframeDiscovery();
+      // Check if childIframeSessions already contains a surviving valid target with an HTTP URL
+      // (e.g. Chrome attached the new RenderFrameHost OOPiF before detaching the previous one during cross-site navigation)
+      let promoted = false;
+      for (const [sId, tInfo] of childIframeSessions.entries()) {
+        const candUrl = tInfo && (tInfo.url || tInfo.title || '');
+        const isExt = candUrl && (candUrl.startsWith('chrome-extension://') || candUrl.startsWith('moz-extension://'));
+        const isHost = candUrl && isHostWorkspaceUrl(candUrl);
+        // Valid OOPiF candidate: may have an HTTP URL or empty/about:blank during process swap
+        const isCandidate = tInfo && !isExt && !isHost && (
+          tInfo.type === 'iframe' || tInfo.type === 'other' || tInfo.type === 'page'
+        );
+        if (isCandidate) {
+          console.log('[CDP Bridge] Promoting surviving child session to active root iframe:', sId, tInfo);
+          iframeSessionId = sId;
+          iframeTargetInfo = tInfo;
+          childIframeSessions.delete(sId);
+          notifyBackendIframeInfo();
+          promoted = true;
+          break;
+        }
+      }
+      if (!promoted) {
+        console.log('[CDP Bridge] No immediate child candidate to promote. Re-triggering auto-attach on host tab.');
+        iframeSessionId = null;
+        iframeTargetInfo = null;
+        childIframeSessions.clear();
+        if (hostTabId) {
+          chrome.debugger.sendCommand({ tabId: Number(hostTabId) }, 'Target.setAutoAttach', {
+            autoAttach: true,
+            waitForDebuggerOnStart: false,
+            flatten: true
+          }, () => {});
+        }
+        startContinuousIframeDiscovery();
+      }
     } else if (targetId) {
       for (const [sId, tInfo] of childIframeSessions.entries()) {
         if (tInfo && tInfo.targetId === targetId) {
@@ -1051,9 +1100,19 @@ chrome.tabs.onActivated.addListener(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket();
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && (!ws || ws.readyState !== WebSocket.OPEN)) {
     connectWebSocket();
+  }
+
+  // If the host workspace tab finished loading and has no active attached session, bind it
+  if (changeInfo.status === 'complete') {
+    const isHost = (hostTabId && tabId === hostTabId) || (tab && tab.url && isHostWorkspaceUrl(tab.url));
+    if (isHost && (!iframeSessionId || !attachedHostTab)) {
+      hostTabId = tabId;
+      if (tab && tab.windowId) hostWindowId = tab.windowId;
+      await initializeHostAndIframeSession();
+    }
   }
 });
 

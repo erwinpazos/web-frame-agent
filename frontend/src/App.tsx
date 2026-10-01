@@ -25,6 +25,14 @@ export function App() {
   const [backendStatus, setBackendStatus] = useState<'connected' | 'offline' | 'checking'>('checking')
   const [extensionConnected, setExtensionConnected] = useState<boolean>(false)
   const [isIframeReady, setIsIframeReady] = useState<boolean>(false)
+  const [hasAttachedOnce, setHasAttachedOnce] = useState<boolean>(false)
+
+  const handleIframeStatus = (ready: boolean) => {
+    setIsIframeReady(ready)
+    if (ready) {
+      setHasAttachedOnce(true)
+    }
+  }
   const [panelWidth, setPanelWidth] = useState<number>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('cobrowse_panel_width')
@@ -67,10 +75,10 @@ export function App() {
       currentUrlRef.current = newUrl
       setCurrentUrl(newUrl)
       setInputUrl(newUrl)
-      if (iframeRef.current) {
-        setIsLoadingIframe(true)
-        iframeRef.current.src = newUrl
-      }
+      // Note: Do NOT reassign iframeRef.current.src here.
+      // The iframe has already navigated internally or rendered in place.
+      // Re-assigning src triggers an iframe hard reload, destroying in-progress form data,
+      // React/DOM memory state, and file inputs (such as uploaded CVs).
     }
   }
 
@@ -82,10 +90,9 @@ export function App() {
     sendMessage,
     stopAgent,
     clearChat,
-  } = useAgentChat({ onUrlChanged: handleAgentUrlChanged, onIframeStatus: setIsIframeReady, authToken })
+  } = useAgentChat({ onUrlChanged: handleAgentUrlChanged, onIframeStatus: handleIframeStatus, authToken })
 
-  // Periodically check backend health
-  // Bootstrap ephemeral session token and check backend health
+  // Bootstrap ephemeral session token once on mount
   useEffect(() => {
     const bootstrapSession = async () => {
       try {
@@ -106,7 +113,10 @@ export function App() {
     }
 
     bootstrapSession()
+  }, [])
 
+  // Periodically check backend health
+  useEffect(() => {
     const checkHealth = async () => {
       try {
         const res = await fetch('/health')
@@ -114,7 +124,11 @@ export function App() {
           const data = await res.json()
           setBackendStatus('connected')
           setExtensionConnected(data.extension_connected || false)
-          setIsIframeReady(Boolean(data.iframe_ready))
+          const isReady = Boolean(data.iframe_ready)
+          setIsIframeReady(isReady)
+          if (isReady) {
+            setHasAttachedOnce(true)
+          }
           const activeModel = data.llm_model || data.vertex_model
           if (activeModel) {
             setModelName(activeModel)
@@ -163,6 +177,15 @@ export function App() {
     e.preventDefault()
     let dest = inputUrl.trim()
     if (!dest) return
+
+    // Guard against accidental double-paste (e.g. https://domain/pathhttps://domain/path)
+    const secondHttps = dest.indexOf('https://', 8)
+    const secondHttp = dest.indexOf('http://', 7)
+    if (secondHttps > 0) {
+      dest = dest.slice(secondHttps)
+    } else if (secondHttp > 0) {
+      dest = dest.slice(secondHttp)
+    }
 
     if (!dest.startsWith('http://') && !dest.startsWith('https://')) {
       dest = 'https://' + dest
@@ -336,7 +359,7 @@ export function App() {
           <Chatbot
             messages={messages}
             isBusy={isBusy}
-            isReady={isIframeReady}
+            isReady={hasAttachedOnce || isIframeReady}
             modelName={modelName}
             onSendMessage={(prompt, attachments) => sendMessage(prompt, currentUrl, attachments)}
             onStopAgent={stopAgent}
@@ -384,8 +407,8 @@ export function App() {
 
           {/* Iframe Container */}
           <div className="flex-1 relative w-full h-full bg-[#090a0f]">
-            {/* Attachment Veil: shown until Chrome extension binds to target iframe OOPIF session */}
-            {!isIframeReady && (
+            {/* Attachment Veil: ONLY shown at initial startup until the extension binds for the first time */}
+            {!hasAttachedOnce && !isIframeReady && (
               <div className="absolute inset-0 bg-[#090a0f]/85 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center z-20 select-none">
                 <div className="max-w-md p-6 bg-[#10121a] border border-[#1e2230] flex flex-col items-center gap-3.5 shadow-2xl">
                   <div className="relative flex items-center justify-center">
