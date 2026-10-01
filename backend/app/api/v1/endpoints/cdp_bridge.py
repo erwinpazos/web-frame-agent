@@ -257,15 +257,17 @@ async def websocket_extension_endpoint(websocket: WebSocket):
                         # If Chrome attached a newer OOPiF target before detaching the previous one, promote the surviving child target
                         promoted = False
                         for c_id, c_info in list(cdp_bridge.child_targets.items()):
-                            c_url = c_info.get("url", "")
-                            if c_url and c_url.startswith("http") and not c_url.startswith("chrome-extension://"):
+                            # Accept any valid child target that is not an extension (even during handshake with empty URL)
+                            if not c_url.startswith("chrome-extension://") and not c_url.startswith("moz-extension://"):
                                 for s_id, t_id in list(cdp_bridge.child_sessions.items()):
                                     if t_id == c_id:
-                                        logger.info(f"[CDP Bridge] Promoting surviving child target {c_id} ({c_url}) to active root iframe session {s_id}")
+                                        logger.info(f"[CDP Bridge] Promoting surviving child target {c_id} ({c_url or 'pending'}) to active root iframe session {s_id}")
                                         cdp_bridge.active_tab_info["targetId"] = c_id
                                         cdp_bridge.active_tab_info["iframe_session_id"] = s_id
-                                        cdp_bridge.active_tab_info["url"] = c_url
-                                        cdp_bridge.active_tab_info["title"] = c_info.get("title", "")
+                                        if c_url:
+                                            cdp_bridge.active_tab_info["url"] = c_url
+                                        if c_info.get("title"):
+                                            cdp_bridge.active_tab_info["title"] = c_info.get("title", "")
                                         cdp_bridge.child_targets.pop(c_id, None)
                                         cdp_bridge.child_sessions.pop(s_id, None)
                                         promoted = True
@@ -273,11 +275,26 @@ async def websocket_extension_endpoint(websocket: WebSocket):
                                 if promoted:
                                     break
                         if not promoted:
-                            logger.info(f"Active iframe target {detached_target} detached, clearing stale session.")
-                            cdp_bridge.active_tab_info.pop("iframe_session_id", None)
+                            logger.info(f"Active iframe target {detached_target} detached, awaiting new target attachment.")
                             cdp_bridge.active_tab_info["targetId"] = str(cdp_bridge.active_tab_info.get("tabId", 1))
                             cdp_bridge.child_targets.clear()
                             cdp_bridge.child_sessions.clear()
+                            # Grace period before dropping iframe_session_id to prevent ATTACH_WAIT flash during cross-site process swaps
+                            async def delayed_stale_clear(expected_session: str):
+                                await asyncio.sleep(2.5)
+                                if cdp_bridge.active_tab_info.get("iframe_session_id") == expected_session:
+                                    if cdp_bridge.active_tab_info.get("targetId") == str(cdp_bridge.active_tab_info.get("tabId", 1)):
+                                        logger.info("Grace period expired without replacement target. Dropping stale iframe session.")
+                                        cdp_bridge.active_tab_info.pop("iframe_session_id", None)
+                                        from app.services.agent_service import agent_service
+                                        await agent_service.broadcast({
+                                            "type": "iframe_status",
+                                            "iframe_ready": False,
+                                            "url": cdp_bridge.active_tab_info.get("url"),
+                                        })
+                            cur_sess = cdp_bridge.active_tab_info.get("iframe_session_id")
+                            if cur_sess:
+                                asyncio.create_task(delayed_stale_clear(cur_sess))
                     else:
                         logger.info(f"Target detached (non-active): {detached_target}")
                     continue
