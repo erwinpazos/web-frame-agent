@@ -310,6 +310,111 @@
         }
       } catch (e) {}
     },
+
+    // 7. Universal OAuth PKCE & SPA redirect guard for cross-origin iframes
+    'preserve-oauth-pkce': function() {
+      try {
+        const KNOWN_VERIFIER_ALIASES = [
+          'auth.undefined.code_verifier',
+          'auth.azureB2C.code_verifier',
+          'azureB2C.code_verifier',
+          'undefined.code_verifier',
+          '_cobrowse_pkce_verifier',
+        ];
+
+        // A. Hook Storage.prototype to mirror PKCE verifiers across both localStorage & sessionStorage
+        const origStorageSetItem = Storage.prototype.setItem;
+        const origStorageGetItem = Storage.prototype.getItem;
+
+        Storage.prototype.setItem = function(key, val) {
+          try {
+            if (typeof key === 'string' && key.includes('code_verifier') && val && val !== 'undefined' && val !== 'null') {
+              for (const alias of KNOWN_VERIFIER_ALIASES) {
+                if (alias !== key) {
+                  try { origStorageSetItem.call(window.localStorage, alias, val); } catch (e) {}
+                  try { origStorageSetItem.call(window.sessionStorage, alias, val); } catch (e) {}
+                }
+              }
+            }
+          } catch (e) {}
+          return origStorageSetItem.apply(this, arguments);
+        };
+
+        Storage.prototype.getItem = function(key) {
+          const res = origStorageGetItem.apply(this, arguments);
+          if ((!res || res === 'undefined' || res === 'null') && typeof key === 'string' && key.includes('code_verifier')) {
+            for (const alias of KNOWN_VERIFIER_ALIASES) {
+              try {
+                const val = origStorageGetItem.call(window.localStorage, alias) || origStorageGetItem.call(window.sessionStorage, alias);
+                if (val && val !== 'undefined' && val !== 'null') return val;
+              } catch (e) {}
+            }
+          }
+          return res;
+        };
+
+        // B. Automatic SPA cleanup: clean ?method=null and unfreeze stuck Nuxt loading spinners
+        const recoverStuckSpa = () => {
+          try {
+            const search = window.location.search || '';
+            if (search.includes('method=null')) {
+              const url = new URL(window.location.href);
+              url.searchParams.delete('method');
+              const cleanSearch = url.searchParams.toString();
+              const newUrl = url.pathname + (cleanSearch ? '?' + cleanSearch : '') + url.hash;
+              window.history.replaceState({}, '', newUrl);
+            }
+
+            // If layout component is stuck on loading=true after initial page load
+            const flexCenter = document.querySelector('.flex_center');
+            if (flexCenter && flexCenter.__vue__ && flexCenter.__vue__.loading === true) {
+              if (!window.location.search.includes('code=') && !window.location.search.includes('state=')) {
+                flexCenter.__vue__.loading = false;
+              }
+            }
+
+            // If stuck on an expired ?state=...&code=... callback URL for > 3.5s
+            if (window.location.search.includes('state=') && window.location.search.includes('code=')) {
+              const auth = window.$nuxt && window.$nuxt.$auth;
+              if (auth && !auth.loggedIn) {
+                const refreshToken = window.localStorage.getItem('auth._refresh_token.azureB2C') ||
+                                    (auth.$storage && auth.$storage.getUniversal('azureB2C.refresh_token'));
+                if (refreshToken && auth.strategy && auth.strategy.refreshToken) {
+                  auth.strategy.refreshToken().then(() => {
+                    if (auth.fetchUser) auth.fetchUser();
+                    const targetUrl = window.localStorage.getItem('auth.azureB2C.redirect') || window.location.pathname;
+                    window.location.href = targetUrl;
+                  }).catch(() => {
+                    window.location.href = window.location.pathname;
+                  });
+                }
+              }
+            }
+          } catch (e) {}
+        };
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', () => {
+            recoverStuckSpa();
+            setTimeout(recoverStuckSpa, 400);
+            setTimeout(recoverStuckSpa, 1200);
+            setTimeout(recoverStuckSpa, 2500);
+            setTimeout(recoverStuckSpa, 4000);
+          });
+        } else {
+          recoverStuckSpa();
+          setTimeout(recoverStuckSpa, 400);
+          setTimeout(recoverStuckSpa, 1200);
+          setTimeout(recoverStuckSpa, 2500);
+          setTimeout(recoverStuckSpa, 4000);
+        }
+        window.addEventListener('load', () => {
+          recoverStuckSpa();
+          setTimeout(recoverStuckSpa, 800);
+          setTimeout(recoverStuckSpa, 3500);
+        });
+      } catch (e) {}
+    },
   };
 
   // Default baseline patches applied everywhere safely
@@ -319,7 +424,7 @@
   PATCHES['contain-window-open']();
   PATCHES['strip-meta-csp']();
   PATCHES['request-storage-access']();
-
+  PATCHES['preserve-oauth-pkce']();
   // Hook History API in MAIN world to capture SPA navigations (pushState / replaceState)
   try {
     const notifyParentOfNavigation = () => {
