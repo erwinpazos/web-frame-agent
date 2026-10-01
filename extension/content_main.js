@@ -322,7 +322,15 @@
           '_cobrowse_pkce_verifier',
         ];
 
-        // A. Hook Storage.prototype to mirror PKCE verifiers across both localStorage & sessionStorage
+        const KNOWN_REDIRECT_ALIASES = [
+          'auth.redirect',
+          'redirect',
+          'auth.azureB2C.redirect',
+          'azureB2C.redirect',
+          '_cobrowse_oauth_redirect',
+        ];
+
+        // A. Hook Storage.prototype to mirror PKCE verifiers & redirect targets across both localStorage & sessionStorage
         const origStorageSetItem = Storage.prototype.setItem;
         const origStorageGetItem = Storage.prototype.getItem;
 
@@ -335,6 +343,13 @@
                   try { origStorageSetItem.call(window.sessionStorage, alias, val); } catch (e) {}
                 }
               }
+            } else if (typeof key === 'string' && key.includes('redirect') && val && typeof val === 'string' && val !== 'null' && val !== 'undefined' && val !== '/') {
+              for (const alias of KNOWN_REDIRECT_ALIASES) {
+                if (alias !== key) {
+                  try { origStorageSetItem.call(window.localStorage, alias, val); } catch (e) {}
+                  try { origStorageSetItem.call(window.sessionStorage, alias, val); } catch (e) {}
+                }
+              }
             }
           } catch (e) {}
           return origStorageSetItem.apply(this, arguments);
@@ -342,17 +357,25 @@
 
         Storage.prototype.getItem = function(key) {
           const res = origStorageGetItem.apply(this, arguments);
-          if ((!res || res === 'undefined' || res === 'null') && typeof key === 'string' && key.includes('code_verifier')) {
-            for (const alias of KNOWN_VERIFIER_ALIASES) {
-              try {
-                const val = origStorageGetItem.call(window.localStorage, alias) || origStorageGetItem.call(window.sessionStorage, alias);
-                if (val && val !== 'undefined' && val !== 'null') return val;
-              } catch (e) {}
+          if ((!res || res === 'undefined' || res === 'null') && typeof key === 'string') {
+            if (key.includes('code_verifier')) {
+              for (const alias of KNOWN_VERIFIER_ALIASES) {
+                try {
+                  const val = origStorageGetItem.call(window.localStorage, alias) || origStorageGetItem.call(window.sessionStorage, alias);
+                  if (val && val !== 'undefined' && val !== 'null') return val;
+                } catch (e) {}
+              }
+            } else if (key.includes('redirect')) {
+              for (const alias of KNOWN_REDIRECT_ALIASES) {
+                try {
+                  const val = origStorageGetItem.call(window.sessionStorage, alias) || origStorageGetItem.call(window.localStorage, alias);
+                  if (val && val !== 'undefined' && val !== 'null' && val !== '/') return val;
+                } catch (e) {}
+              }
             }
           }
           return res;
         };
-
         // B. Automatic SPA cleanup: clean ?method=null and unfreeze stuck Nuxt loading spinners
         const recoverStuckSpa = () => {
           try {
@@ -415,9 +438,18 @@
               if (app.$router) {
                 const origReplace = app.$router.replace;
                 app.$router.replace = function(loc) {
-                  if ((loc === '/' || (loc && loc.path === '/')) && window.location.pathname.startsWith('/offres/')) {
-                    console.log('[CDP Bridge] Blocked VueRouter.replace to / from offer page');
-                    return Promise.resolve();
+                  // If router attempts to replace with '/', check if a preserved return destination exists
+                  if (loc === '/' || (loc && loc.path === '/')) {
+                    const savedTarget = window.sessionStorage.getItem('_cobrowse_oauth_redirect') ||
+                                        window.localStorage.getItem('_cobrowse_oauth_redirect');
+                    if (savedTarget && savedTarget !== '/' && typeof savedTarget === 'string') {
+                      console.log('[CDP Bridge] VueRouter.replace to / intercepted, following preserved target:', savedTarget);
+                      return origReplace.call(this, savedTarget);
+                    }
+                    if (window.location.pathname !== '/') {
+                      console.log('[CDP Bridge] VueRouter.replace to / blocked to maintain current page context');
+                      return Promise.resolve();
+                    }
                   }
                   return origReplace.apply(this, arguments);
                 };
@@ -488,22 +520,14 @@
     };
 
     const origPushState = history.pushState;
-    history.pushState = function(state, title, url) {
-      if (url && (url === '/' || url === window.location.origin + '/') && window.location.pathname.startsWith('/offres/')) {
-        console.log('[CDP Bridge] Blocked unwanted history.pushState to root / from offer page');
-        return;
-      }
+    history.pushState = function() {
       const res = origPushState.apply(this, arguments);
       notifyParentOfNavigation();
       return res;
     };
 
     const origReplaceState = history.replaceState;
-    history.replaceState = function(state, title, url) {
-      if (url && (url === '/' || url === window.location.origin + '/') && window.location.pathname.startsWith('/offres/')) {
-        console.log('[CDP Bridge] Blocked unwanted history.replaceState to root / from offer page');
-        return;
-      }
+    history.replaceState = function() {
       const res = origReplaceState.apply(this, arguments);
       notifyParentOfNavigation();
       return res;
