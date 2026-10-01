@@ -465,8 +465,8 @@ function startContinuousIframeDiscovery() {
         // Exclude external standalone tabs
         if (t.tabId && t.tabId !== hostTabId) return false;
         // Exclude internal extensions and UI
-        if (t.url && (isHostWorkspaceUrl(t.url) || t.url.startsWith('chrome-extension://'))) return false;
-
+        if (t.url && (isHostWorkspaceUrl(t.url) || t.url.startsWith('chrome-extension://') || t.url.startsWith('moz-extension://'))) return false;
+        if (t.title && (t.title.includes('chrome-extension://') || t.title.toLowerCase().includes('extension'))) return false;
         // An iframe target MUST have either an HTTP url OR a title containing an HTTP URL
         const hasHttp = (t.url && t.url.startsWith('http')) || (t.title && t.title.startsWith('http'));
         if (!hasHttp) return false;
@@ -844,11 +844,17 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       (targetInfo.url && (targetInfo.url.endsWith('.js') || targetInfo.url.includes('/sw.js') || targetInfo.url.includes('worker.js')))
     );
 
-    const isCandidate = !isHostTab && !isWorker && (
+    // Filter out third-party extensions (Bitwarden, 1Password, LastPass, etc.)
+    const isExtension = targetInfo && (
+      (targetInfo.url && (targetInfo.url.startsWith('chrome-extension://') || targetInfo.url.startsWith('moz-extension://'))) ||
+      (targetInfo.type === 'other' && targetInfo.title && targetInfo.title.toLowerCase().includes('extension'))
+    );
+
+    const isCandidate = !isHostTab && !isWorker && !isExtension && (
       targetInfo.type === 'iframe' ||
       targetInfo.type === 'other' ||
       targetInfo.type === 'page'
-    ) && (targetInfo.url ? !isHostWorkspaceUrl(targetInfo.url) : true);
+    ) && (targetInfo.url ? (!isHostWorkspaceUrl(targetInfo.url) && !targetInfo.url.startsWith('chrome-extension://')) : true);
 
     if (isCandidate) {
       if (!iframeSessionId) {
@@ -919,10 +925,27 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     const { targetId } = params || {};
     if (iframeTargetInfo && targetId === iframeTargetInfo.targetId) {
       console.log('[CDP Bridge] Active root iframe detached:', targetId);
-      iframeSessionId = null;
-      iframeTargetInfo = null;
-      childIframeSessions.clear();
-      startContinuousIframeDiscovery();
+      // Check if childIframeSessions already contains a surviving valid target with an HTTP URL
+      // (e.g. Chrome attached the new RenderFrameHost OOPiF before detaching the previous one during cross-site navigation)
+      let promoted = false;
+      for (const [sId, tInfo] of childIframeSessions.entries()) {
+        const candUrl = tInfo && (tInfo.url || tInfo.title || '');
+        if (candUrl && candUrl.startsWith('http') && !candUrl.startsWith('chrome-extension://') && !isHostWorkspaceUrl(candUrl)) {
+          console.log('[CDP Bridge] Promoting surviving child session to active root iframe:', sId, tInfo);
+          iframeSessionId = sId;
+          iframeTargetInfo = tInfo;
+          childIframeSessions.delete(sId);
+          notifyBackendIframeInfo();
+          promoted = true;
+          break;
+        }
+      }
+      if (!promoted) {
+        iframeSessionId = null;
+        iframeTargetInfo = null;
+        childIframeSessions.clear();
+        startContinuousIframeDiscovery();
+      }
     } else if (targetId) {
       for (const [sId, tInfo] of childIframeSessions.entries()) {
         if (tInfo && tInfo.targetId === targetId) {
