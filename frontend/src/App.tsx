@@ -178,6 +178,15 @@ export function App() {
     let dest = inputUrl.trim()
     if (!dest) return
 
+    // Guard against accidental double-paste (e.g. https://domain/pathhttps://domain/path)
+    const secondHttps = dest.indexOf('https://', 8)
+    const secondHttp = dest.indexOf('http://', 7)
+    if (secondHttps > 0) {
+      dest = dest.slice(secondHttps)
+    } else if (secondHttp > 0) {
+      dest = dest.slice(secondHttp)
+    }
+
     if (!dest.startsWith('http://') && !dest.startsWith('https://')) {
       dest = 'https://' + dest
     }
